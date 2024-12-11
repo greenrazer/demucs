@@ -1,11 +1,15 @@
+import demucs.api
+from demucs.api import AudioFile
+
 import copy
 from pathlib import Path
 import random
 from threading import Lock
 from typing import Callable, Dict, Optional, Tuple, Union
-import demucs.api
 import torch
 from torch.nn import functional as F
+import subprocess
+import torchaudio
 import julius
 
 
@@ -490,11 +494,6 @@ def separate_tensor(
     return (wav, dict(zip(model.sources, out[0])))
 
 
-from demucs.api import AudioFile
-import subprocess
-import torchaudio
-
-
 def _load_audio(model, track: Path):
     sample_rate = model.samplerate
     audio_channels = model.audio_channels
@@ -534,18 +533,12 @@ def _load_audio(model, track: Path):
 
 if __name__ == "__main__":
     filename = "test2.mp3"
-    # separator = demucs.api.Separator()
-    # origin, separated = separator.separate_audio_file(filename)
-    # for stem, audio_data in separated.items():
-    #     demucs.api.save_audio(
-    #         audio_data,
-    #         f"separated/coreml/{stem}_{filename}",
-    #         samplerate=separator.samplerate,
-    #     )
 
     model = torch.load("models/htdemucs.pt")
 
-    wav, separated = separate_tensor(model, _load_audio(model, filename), model.samplerate)
+    wav, separated = separate_tensor(
+        model, _load_audio(model, filename), model.samplerate
+    )
 
     for stem, audio_data in separated.items():
         demucs.api.save_audio(
