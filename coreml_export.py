@@ -52,6 +52,7 @@ class DummyPoolExecutor:
     def __exit__(self, exc_type, exc_value, exc_tb):
         return
 
+
 def pad_symmetrically(tensor, target_length, offset=0, length=None):
     total_length = tensor.shape[-1]
 
@@ -76,6 +77,7 @@ def pad_symmetrically(tensor, target_length, offset=0, length=None):
     out = F.pad(tensor[..., correct_start:correct_end], (pad_left, pad_right))
     return out
 
+
 def center_trim(tensor: torch.Tensor, reference: Union[torch.Tensor, int]):
     """
     Center trim `tensor` with respect to `reference`, along the last dimension.
@@ -98,24 +100,15 @@ def center_trim(tensor: torch.Tensor, reference: Union[torch.Tensor, int]):
 def apply_model(
     model,
     mix,
-    shifts: int = 1,
-    split: bool = True,
-    overlap: float = 0.25,
-    transition_power: float = 1.0,
-    progress: bool = False,
-    device=None,
-    num_workers: int = 0,
+    tensor_offset=0,
+    tensor_length=None,
     segment: Optional[float] = None,
-    tensor_offset = 0,
-    tensor_length = None,
-    pool=None,
-    lock=None,
-    callback: Optional[Callable[[dict], None]] = None,
-    callback_arg: Optional[dict] = None,
 ) -> torch.Tensor:
+    if tensor_length is None:
+        tensor_length = mix.shape[-1]
 
     batch, channels, length = mix.shape
-    out = torch.zeros(batch, len(model.sources), channels, tensor_length).to(device)
+    out = torch.zeros(batch, len(model.sources), channels, tensor_length).to(mix.device)
 
     valid_length: int
     if segment is not None:
@@ -125,7 +118,10 @@ def apply_model(
     else:
         valid_length = tensor_length
 
-    padded_mix = pad_symmetrically(mix, valid_length, offset=tensor_offset, length=tensor_length).to(device)
+    padded_mix = pad_symmetrically(
+        mix, valid_length, offset=tensor_offset, length=tensor_length
+    ).to(mix.device)
+
     with torch.no_grad():
         out = model(padded_mix)
     return center_trim(out, tensor_length)
@@ -134,62 +130,44 @@ def apply_model(
 def apply_model_split(
     model,
     mix,
-    shifts: int = 1,
-    split: bool = True,
+    tensor_offset=0,
+    tensor_length=None,
     overlap: float = 0.25,
     transition_power: float = 1.0,
-    progress: bool = False,
-    device=None,
-    num_workers: int = 0,
     segment: Optional[float] = None,
-    pool=None,
-    lock=None,
-    tensor_offset = 0,
-    tensor_length = None,
-    callback: Optional[Callable[[dict], None]] = None,
-    callback_arg: Optional[dict] = None,
 ):
-    kwargs = {
-        "shifts": shifts,
-        "split": split,
-        "overlap": overlap,
-        "transition_power": transition_power,
-        "progress": progress,
-        "device": device,
-        "pool": pool,
-        "segment": segment,
-        "lock": lock,
-    }
-
     batch, channels, length = mix.shape
 
-    out = torch.zeros(batch, len(model.sources), channels, tensor_length, device=device)
-    sum_weight = torch.zeros(tensor_length, device=device)
+    out = torch.zeros(batch, len(model.sources), channels, tensor_length).to(mix.device)
+    sum_weight = torch.zeros(tensor_length).to(mix.device)
 
     if segment is None:
         segment = model.segment
 
     segment_length: int = int(model.samplerate * segment)
+
     weight = torch.cat(
         [
-            torch.arange(1, segment_length // 2 + 1, device=device),
-            torch.arange(segment_length - segment_length // 2, 0, -1, device=device),
+            torch.arange(1, segment_length // 2 + 1),
+            torch.arange(segment_length - segment_length // 2, 0, -1),
         ]
-    )
+    ).to(mix.device)
+
     weight = (weight / weight.max()) ** transition_power
     for inner_offset in range(0, tensor_length, int((1 - overlap) * segment_length)):
         model_out = apply_model(
             model,
             mix,
-            tensor_offset = tensor_offset + inner_offset,
-            tensor_length= min(tensor_length - inner_offset, segment_length),
-            **kwargs,
-            callback_arg=callback_arg,
-            callback=None,
+            tensor_offset=tensor_offset + inner_offset,
+            tensor_length=min(tensor_length - inner_offset, segment_length),
         )
         chunk_length = model_out.shape[-1]
-        out[..., inner_offset : inner_offset + segment_length] += weight[:chunk_length] * model_out
-        sum_weight[inner_offset : inner_offset + segment_length] += weight[:chunk_length]
+        out[..., inner_offset : inner_offset + segment_length] += (
+            weight[:chunk_length] * model_out
+        )
+        sum_weight[inner_offset : inner_offset + segment_length] += weight[
+            :chunk_length
+        ]
     out /= sum_weight
     return out
 
@@ -201,42 +179,32 @@ def apply_model_shifts(
     split: bool = True,
     overlap: float = 0.25,
     transition_power: float = 1.0,
-    progress: bool = False,
-    device=None,
-    num_workers: int = 0,
-    segment: Optional[float] = None,
-    pool=None,
-    lock=None,
-    callback: Optional[Callable[[dict], None]] = None,
-    callback_arg: Optional[dict] = None,
 ):
-    pool = DummyPoolExecutor()
-    lock = Lock()
-    kwargs = {
-        "shifts": shifts,
-        "split": split,
-        "overlap": overlap,
-        "transition_power": transition_power,
-        "progress": progress,
-        "device": device,
-        "pool": pool,
-        "segment": segment,
-        "lock": lock,
-    }
-
     batch, channels, length = mix.shape
-    out = torch.zeros((batch, len(model.sources), channels, length)).to(device)
+    out = torch.zeros((batch, len(model.sources), channels, length)).to(mix.device)
 
     max_shift = int(0.5 * model.samplerate)
-    padded_mix = pad_symmetrically(mix, length + 2 * max_shift).to(device)
+    padded_mix = pad_symmetrically(mix, length + 2 * max_shift).to(mix.device)
 
     for shift_idx in range(shifts):
         offset = max_shift // (shift_idx + 1)
 
         if split:
-            res = apply_model_split(model, padded_mix, tensor_offset=offset, tensor_length=length + max_shift - offset, **kwargs, callback_arg=callback_arg)
+            res = apply_model_split(
+                model,
+                padded_mix,
+                tensor_offset=offset,
+                tensor_length=length + max_shift - offset,
+                overlap=overlap,
+                transition_power=transition_power,
+            )
         else:
-            res = apply_model(model, padded_mix, tensor_offset=offset, tensor_length=length + max_shift - offset, **kwargs, callback_arg=callback_arg)
+            res = apply_model(
+                model,
+                padded_mix,
+                tensor_offset=offset,
+                tensor_length=length + max_shift - offset,
+            )
 
         out += res[..., max_shift - offset : length + max_shift - offset]
     out /= shifts
@@ -278,7 +246,6 @@ def separate_tensor(
     audio_channels = model.audio_channels
 
     if input_sample_rate is not None and input_sample_rate != sample_rate:
-        # wav = convert_audio(wav, sr, sample_rate, audio_channels)
         wav = convert_audio_channels(wav, audio_channels)
         wav = julius.resample_frac(wav, input_sample_rate, sample_rate)
 
@@ -302,21 +269,10 @@ def separate_tensor(
         res = apply_model_shifts(
             sub_model,
             mix,
-            segment=None,
             shifts=1,
             split=True,
             overlap=0.25,
             transition_power=transition_power,
-            device=device,
-            num_workers=0,
-            callback=None,
-            callback_arg={
-                "audio_length": wav.shape[1],
-                "model_idx_in_bag": 0,
-                "shift_idx": 0,
-                "segment_offset": 0,
-            },
-            progress=False,
         )
 
         for k, inst_weight in enumerate(model_weights):
@@ -379,7 +335,7 @@ if __name__ == "__main__":
     model = torch.load("models/htdemucs.pt")
 
     wav, separated = separate_tensor(
-        model, _load_audio(model, filename), model.samplerate
+        model, _load_audio(model, filename).to("mps"), model.samplerate
     )
 
     for stem, audio_data in separated.items():
