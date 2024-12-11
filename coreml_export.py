@@ -49,7 +49,6 @@ def pad_symmetrically(tensor, target_length, offset=0, length=None):
         length = min(total_length - offset, length)
 
     delta = target_length - length
-    total_length = tensor.shape[-1]
     assert delta >= 0
 
     start = offset - delta // 2
@@ -262,23 +261,17 @@ def run_model(
             for inner_offset in range(
                 0, shift_length, int((1 - split_overlap) * split_segment_length)
             ):
-                split_offset = shift_offset + inner_offset
-                split_length = min(shift_length - inner_offset, split_segment_length)
+                split_offset = inner_offset
+                split_length = min(length - inner_offset, split_segment_length)
 
                 model_out = torch.zeros(
                     batch, len(sub_model.sources), channels, split_length
                 ).to(mix.device)
 
-                if split_segment is not None:
-                    valid_length = int(split_segment * sub_model.samplerate)
-                elif hasattr(model, "valid_length"):
-                    valid_length = sub_model.valid_length(split_length)
-                else:
-                    valid_length = split_length
+                valid_length = int(split_segment * sub_model.samplerate)
 
-                model_length = min(length - inner_offset, split_segment_length)
                 split_padded_mix = pad_symmetrically(
-                    mix, valid_length, offset=split_offset, length=model_length
+                    mix, valid_length, offset=split_offset, length=split_length
                 ).to(mix.device)
 
                 with torch.no_grad():
