@@ -236,7 +236,6 @@ def run_model(
         )
 
         max_shift = int(0.5 * sub_model.samplerate)
-        padded_mix = pad_symmetrically(mix, length + 2 * max_shift)
 
         for shift_idx in range(shifts):
             shift_offset = max_shift // (shift_idx + 1)
@@ -277,8 +276,9 @@ def run_model(
                 else:
                     valid_length = split_length
 
+                model_length = min(length - inner_offset, split_segment_length)
                 split_padded_mix = pad_symmetrically(
-                    padded_mix, valid_length, offset=split_offset, length=split_length
+                    mix, valid_length, offset=split_offset, length=model_length
                 ).to(mix.device)
 
                 with torch.no_grad():
