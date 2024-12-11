@@ -11,6 +11,7 @@ import torchaudio
 import julius
 import lameenc
 
+
 def convert_audio_channels(wav, channels=2):
     """Convert audio to the given number of channels."""
     *shape, src_channels, length = wav.shape
@@ -38,6 +39,7 @@ def convert_audio_channels(wav, channels=2):
         )
     return wav
 
+
 def pad_symmetrically(tensor, target_length, offset=0, length=None):
     total_length = tensor.shape[-1]
 
@@ -62,6 +64,7 @@ def pad_symmetrically(tensor, target_length, offset=0, length=None):
     out = F.pad(tensor[..., correct_start:correct_end], (pad_left, pad_right))
     return out.to(tensor.device)
 
+
 def center_trim(tensor: torch.Tensor, reference: Union[torch.Tensor, int]):
     ref_size: int
     if isinstance(reference, torch.Tensor):
@@ -74,6 +77,7 @@ def center_trim(tensor: torch.Tensor, reference: Union[torch.Tensor, int]):
     if delta:
         tensor = tensor[..., delta // 2 : -(delta - delta // 2)]
     return tensor
+
 
 def load_audio(model, track: Path):
     sample_rate = model.samplerate
@@ -111,22 +115,24 @@ def load_audio(model, track: Path):
         )
     return wav
 
-def prevent_clip(wav, mode='rescale'):
+
+def prevent_clip(wav, mode="rescale"):
     """
     different strategies for avoiding raw clipping.
     """
-    if mode is None or mode == 'none':
+    if mode is None or mode == "none":
         return wav
     assert wav.dtype.is_floating_point, "too late for clipping"
-    if mode == 'rescale':
+    if mode == "rescale":
         wav = wav / max(1.01 * wav.abs().max(), 1)
-    elif mode == 'clamp':
+    elif mode == "clamp":
         wav = wav.clamp(-0.99, 0.99)
-    elif mode == 'tanh':
+    elif mode == "tanh":
         wav = torch.tanh(wav)
     else:
         raise ValueError(f"Invalid mode {mode}")
     return wav
+
 
 def i16_pcm(wav):
     """Convert audio to 16 bits integer PCM format."""
@@ -134,6 +140,7 @@ def i16_pcm(wav):
         return (wav.clamp_(-1, 1) * (2**15 - 1)).short()
     else:
         return wav
+
 
 def encode_mp3(wav, path, samplerate=44100, bitrate=320, quality=2, verbose=False):
     """Save given audio as mp3. This should work on all OSes."""
@@ -153,14 +160,17 @@ def encode_mp3(wav, path, samplerate=44100, bitrate=320, quality=2, verbose=Fals
     with open(path, "wb") as f:
         f.write(mp3_data)
 
-def save_audio(wav: torch.Tensor,
-               path: Union[str, Path],
-               samplerate: int,
-               bitrate: int = 320,
-               clip: Literal["rescale", "clamp", "tanh", "none"] = 'rescale',
-               bits_per_sample: Literal[16, 24, 32] = 16,
-               as_float: bool = False,
-               preset: Literal[2, 3, 4, 5, 6, 7] = 2):
+
+def save_audio(
+    wav: torch.Tensor,
+    path: Union[str, Path],
+    samplerate: int,
+    bitrate: int = 320,
+    clip: Literal["rescale", "clamp", "tanh", "none"] = "rescale",
+    bits_per_sample: Literal[16, 24, 32] = 16,
+    as_float: bool = False,
+    preset: Literal[2, 3, 4, 5, 6, 7] = 2,
+):
     wav = prevent_clip(wav, mode=clip)
     path = Path(path)
     suffix = path.suffix.lower()
@@ -169,17 +179,30 @@ def save_audio(wav: torch.Tensor,
     elif suffix == ".wav":
         if as_float:
             bits_per_sample = 32
-            encoding = 'PCM_F'
+            encoding = "PCM_F"
         else:
-            encoding = 'PCM_S'
-        torchaudio.save(str(path), wav, sample_rate=samplerate,
-                encoding=encoding, bits_per_sample=bits_per_sample)
+            encoding = "PCM_S"
+        torchaudio.save(
+            str(path),
+            wav,
+            sample_rate=samplerate,
+            encoding=encoding,
+            bits_per_sample=bits_per_sample,
+        )
     elif suffix == ".flac":
-        torchaudio.save(str(path), wav, sample_rate=samplerate, bits_per_sample=bits_per_sample)
+        torchaudio.save(
+            str(path), wav, sample_rate=samplerate, bits_per_sample=bits_per_sample
+        )
     else:
         raise ValueError(f"Invalid suffix for path: {suffix}")
 
-def preprocess(wav: torch.Tensor, input_sample_rate: int, model_sample_rate: int, audio_channels: int):
+
+def preprocess(
+    wav: torch.Tensor,
+    input_sample_rate: int,
+    model_sample_rate: int,
+    audio_channels: int,
+):
     if input_sample_rate is not None and input_sample_rate != model_sample_rate:
         wav = convert_audio_channels(wav, audio_channels)
         wav = julius.resample_frac(wav, input_sample_rate, model_sample_rate)
@@ -193,21 +216,24 @@ def preprocess(wav: torch.Tensor, input_sample_rate: int, model_sample_rate: int
 
     return (ref, mix)
 
+
 def run_model(
-    model, 
-    mix: torch.Tensor, 
+    model,
+    mix: torch.Tensor,
     shifts: int = 1,
     split: bool = True,
     split_overlap: float = 0.25,
     split_transition_power: float = 1.0,
-    split_segment: Optional[float] = None
+    split_segment: Optional[float] = None,
 ):
     batch, channels, length = mix.shape
     out = torch.zeros((batch, len(model.sources), channels, length)).to(mix.device)
     totals = torch.zeros((len(model.sources),))
 
     for sub_model, model_weights in zip(model.models, model.weights):
-        shift_out = torch.zeros((batch, len(sub_model.sources), channels, length)).to(mix.device)
+        shift_out = torch.zeros((batch, len(sub_model.sources), channels, length)).to(
+            mix.device
+        )
 
         max_shift = int(0.5 * sub_model.samplerate)
         padded_mix = pad_symmetrically(mix, length + 2 * max_shift)
@@ -222,19 +248,27 @@ def run_model(
             split_weight = torch.cat(
                 [
                     torch.arange(1, split_segment_length // 2 + 1),
-                    torch.arange(split_segment_length - split_segment_length // 2, 0, -1),
+                    torch.arange(
+                        split_segment_length - split_segment_length // 2, 0, -1
+                    ),
                 ]
             ).to(mix.device)
             split_weight = (split_weight / split_weight.max()) ** split_transition_power
 
-            split_out = torch.zeros(batch, len(sub_model.sources), channels, shift_length).to(mix.device)
-            
+            split_out = torch.zeros(
+                batch, len(sub_model.sources), channels, shift_length
+            ).to(mix.device)
+
             split_sum_weight = torch.zeros(shift_length).to(mix.device)
-            for inner_offset in range(0, shift_length, int((1 - split_overlap) * split_segment_length)):
+            for inner_offset in range(
+                0, shift_length, int((1 - split_overlap) * split_segment_length)
+            ):
                 split_offset = shift_offset + inner_offset
                 split_length = min(shift_length - inner_offset, split_segment_length)
 
-                model_out = torch.zeros(batch, len(sub_model.sources), channels, split_length).to(mix.device)
+                model_out = torch.zeros(
+                    batch, len(sub_model.sources), channels, split_length
+                ).to(mix.device)
 
                 if split_segment is not None:
                     valid_length = int(split_segment * sub_model.samplerate)
@@ -243,7 +277,9 @@ def run_model(
                 else:
                     valid_length = split_length
 
-                split_padded_mix = pad_symmetrically(padded_mix, valid_length, offset=split_offset, length=split_length).to(mix.device)
+                split_padded_mix = pad_symmetrically(
+                    padded_mix, valid_length, offset=split_offset, length=split_length
+                ).to(mix.device)
 
                 with torch.no_grad():
                     model_out = sub_model(split_padded_mix)
@@ -254,14 +290,15 @@ def run_model(
                 split_out[..., inner_offset : inner_offset + split_segment_length] += (
                     split_weight[:chunk_length] * model_out
                 )
-                split_sum_weight[inner_offset : inner_offset + split_segment_length] += split_weight[
-                    :chunk_length
-                ]
+                split_sum_weight[
+                    inner_offset : inner_offset + split_segment_length
+                ] += split_weight[:chunk_length]
             split_out /= split_sum_weight
 
+            shift_out += split_out[
+                ..., max_shift - shift_offset : length + max_shift - shift_offset
+            ]
 
-            shift_out += split_out[..., max_shift - shift_offset : length + max_shift - shift_offset]
-        
         shift_out /= shifts
 
         for k, inst_weight in enumerate(model_weights):
@@ -271,8 +308,9 @@ def run_model(
 
     for k in range(out.shape[1]):
         out[:, k, :, :] /= totals[k]
-    
+
     return out
+
 
 def postprocess(output: torch.Tensor, ref: torch.Tensor):
     # un-normalized
@@ -280,6 +318,7 @@ def postprocess(output: torch.Tensor, ref: torch.Tensor):
     output += ref.mean()
 
     return dict(zip(model.sources, output[0]))
+
 
 if __name__ == "__main__":
     filename = "test2.mp3"
@@ -290,13 +329,13 @@ if __name__ == "__main__":
 
     ref, mix = preprocess(wav, model.samplerate, model.samplerate, model.audio_channels)
     output = run_model(
-        model, 
-        mix, 
-        shifts = 1,
-        split = True,
-        split_overlap = 0.25,
-        split_transition_power = 1.0,
-        split_segment = None
+        model,
+        mix,
+        shifts=1,
+        split=True,
+        split_overlap=0.25,
+        split_transition_power=1.0,
+        split_segment=None,
     )
     separated = postprocess(output, ref)
 
