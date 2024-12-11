@@ -52,59 +52,29 @@ class DummyPoolExecutor:
     def __exit__(self, exc_type, exc_value, exc_tb):
         return
 
+def pad_symmetrically(tensor, target_length, offset=0, length=None):
+    total_length = tensor.shape[-1]
 
-class TensorChunk:
-    def __init__(self, tensor, offset=0, length=None):
-        total_length = tensor.shape[-1]
-        assert offset >= 0
-        assert offset < total_length
-
-        if length is None:
-            length = total_length - offset
-        else:
-            length = min(total_length - offset, length)
-
-        if isinstance(tensor, TensorChunk):
-            self.tensor = tensor.tensor
-            self.offset = offset + tensor.offset
-        else:
-            self.tensor = tensor
-            self.offset = offset
-        self.length = length
-        self.device = tensor.device
-
-    @property
-    def shape(self):
-        shape = list(self.tensor.shape)
-        shape[-1] = self.length
-        return shape
-
-    def padded(self, target_length):
-        delta = target_length - self.length
-        total_length = self.tensor.shape[-1]
-        assert delta >= 0
-
-        start = self.offset - delta // 2
-        end = start + target_length
-
-        correct_start = max(0, start)
-        correct_end = min(total_length, end)
-
-        pad_left = correct_start - start
-        pad_right = end - correct_end
-
-        out = F.pad(self.tensor[..., correct_start:correct_end], (pad_left, pad_right))
-        assert out.shape[-1] == target_length
-        return out
-
-
-def tensor_chunk(tensor_or_chunk):
-    if isinstance(tensor_or_chunk, TensorChunk):
-        return tensor_or_chunk
+    if length is None:
+        length = total_length - offset
     else:
-        assert isinstance(tensor_or_chunk, torch.Tensor)
-        return TensorChunk(tensor_or_chunk)
+        length = min(total_length - offset, length)
 
+    delta = target_length - length
+    total_length = tensor.shape[-1]
+    assert delta >= 0
+
+    start = offset - delta // 2
+    end = start + target_length
+
+    correct_start = max(0, start)
+    correct_end = min(total_length, end)
+
+    pad_left = correct_start - start
+    pad_right = end - correct_end
+
+    out = F.pad(tensor[..., correct_start:correct_end], (pad_left, pad_right))
+    return out
 
 def center_trim(tensor: torch.Tensor, reference: Union[torch.Tensor, int]):
     """
@@ -136,57 +106,29 @@ def apply_model(
     device=None,
     num_workers: int = 0,
     segment: Optional[float] = None,
+    tensor_offset = 0,
+    tensor_length = None,
     pool=None,
     lock=None,
     callback: Optional[Callable[[dict], None]] = None,
     callback_arg: Optional[dict] = None,
 ) -> torch.Tensor:
-    pool = DummyPoolExecutor()
-    lock = Lock()
-    kwargs = {
-        "shifts": shifts,
-        "split": split,
-        "overlap": overlap,
-        "transition_power": transition_power,
-        "progress": progress,
-        "device": device,
-        "pool": pool,
-        "segment": segment,
-        "lock": lock,
-    }
 
-    out: Union[float, torch.Tensor]
-    res: Union[float, torch.Tensor]
-
-    if "models" not in callback_arg:
-        callback_arg["models"] = 1
-
-    model.to(device)
-    model.eval()
-
-    assert transition_power >= 1, "transition_power < 1 leads to weird behavior."
     batch, channels, length = mix.shape
+    out = torch.zeros(batch, len(model.sources), channels, tensor_length).to(device)
 
     valid_length: int
     if segment is not None:
         valid_length = int(segment * model.samplerate)
     elif hasattr(model, "valid_length"):
-        valid_length = model.valid_length(length)  # type: ignore
+        valid_length = model.valid_length(tensor_length)
     else:
-        valid_length = length
-    mix = tensor_chunk(mix)
-    assert isinstance(mix, TensorChunk)
-    padded_mix = mix.padded(valid_length).to(device)
-    with lock:
-        if callback is not None:
-            callback(_replace_dict(callback_arg, ("state", "start")))  # type: ignore
+        valid_length = tensor_length
+
+    padded_mix = pad_symmetrically(mix, valid_length, offset=tensor_offset, length=tensor_length).to(device)
     with torch.no_grad():
         out = model(padded_mix)
-    with lock:
-        if callback is not None:
-            callback(_replace_dict(callback_arg, ("state", "end")))  # type: ignore
-    assert isinstance(out, torch.Tensor)
-    return center_trim(out, length)
+    return center_trim(out, tensor_length)
 
 
 def apply_model_split(
@@ -202,11 +144,11 @@ def apply_model_split(
     segment: Optional[float] = None,
     pool=None,
     lock=None,
+    tensor_offset = 0,
+    tensor_length = None,
     callback: Optional[Callable[[dict], None]] = None,
     callback_arg: Optional[dict] = None,
 ):
-    pool = DummyPoolExecutor()
-    lock = Lock()
     kwargs = {
         "shifts": shifts,
         "split": split,
@@ -219,74 +161,36 @@ def apply_model_split(
         "lock": lock,
     }
 
-    out: Union[float, torch.Tensor]
-    res: Union[float, torch.Tensor]
-
-    if "models" not in callback_arg:
-        callback_arg["models"] = 1
-
-    model.to(device)
-    model.eval()
-
-    assert transition_power >= 1, "transition_power < 1 leads to weird behavior."
     batch, channels, length = mix.shape
 
-    kwargs["split"] = False
-    out = torch.zeros(batch, len(model.sources), channels, length, device=mix.device)
-    sum_weight = torch.zeros(length, device=mix.device)
+    out = torch.zeros(batch, len(model.sources), channels, tensor_length, device=device)
+    sum_weight = torch.zeros(tensor_length, device=device)
+
     if segment is None:
         segment = model.segment
-    assert segment is not None and segment > 0.0
+
     segment_length: int = int(model.samplerate * segment)
-    stride = int((1 - overlap) * segment_length)
-    offsets = range(0, length, stride)
-    scale = float(format(stride / model.samplerate, ".2f"))
-    # We start from a triangle shaped weight, with maximal weight in the middle
-    # of the segment. Then we normalize and take to the power `transition_power`.
-    # Large values of transition power will lead to sharper transitions.
     weight = torch.cat(
         [
             torch.arange(1, segment_length // 2 + 1, device=device),
             torch.arange(segment_length - segment_length // 2, 0, -1, device=device),
         ]
     )
-    assert len(weight) == segment_length
-    # If the overlap < 50%, this will translate to linear transition when
-    # transition_power is 1.
     weight = (weight / weight.max()) ** transition_power
-    futures = []
-    for offset in offsets:
-        chunk = TensorChunk(mix, offset, segment_length)
-        future = pool.submit(
-            apply_model,
+    for inner_offset in range(0, tensor_length, int((1 - overlap) * segment_length)):
+        model_out = apply_model(
             model,
-            chunk,
+            mix,
+            tensor_offset = tensor_offset + inner_offset,
+            tensor_length= min(tensor_length - inner_offset, segment_length),
             **kwargs,
             callback_arg=callback_arg,
-            callback=(
-                lambda d, i=offset: callback(_replace_dict(d, ("segment_offset", i)))
-                if callback
-                else None
-            ),
+            callback=None,
         )
-        futures.append((future, offset))
-        offset += segment_length
-    for future, offset in futures:
-        try:
-            chunk_out = future.result()  # type: torch.Tensor
-        except Exception:
-            pool.shutdown(wait=True, cancel_futures=True)
-            raise
-        chunk_length = chunk_out.shape[-1]
-        out[..., offset : offset + segment_length] += (
-            weight[:chunk_length] * chunk_out
-        ).to(mix.device)
-        sum_weight[offset : offset + segment_length] += weight[:chunk_length].to(
-            mix.device
-        )
-    assert sum_weight.min() > 0
+        chunk_length = model_out.shape[-1]
+        out[..., inner_offset : inner_offset + segment_length] += weight[:chunk_length] * model_out
+        sum_weight[inner_offset : inner_offset + segment_length] += weight[:chunk_length]
     out /= sum_weight
-    assert isinstance(out, torch.Tensor)
     return out
 
 
@@ -320,38 +224,22 @@ def apply_model_shifts(
         "lock": lock,
     }
 
-    out: Union[float, torch.Tensor]
-    res: Union[float, torch.Tensor]
-
-    if "models" not in callback_arg:
-        callback_arg["models"] = 1
-
-    model.to(device)
-    model.eval()
-
-    assert transition_power >= 1, "transition_power < 1 leads to weird behavior."
     batch, channels, length = mix.shape
+    out = torch.zeros((batch, len(model.sources), channels, length)).to(device)
 
-    kwargs["shifts"] = 0
     max_shift = int(0.5 * model.samplerate)
-    mix = tensor_chunk(mix)
-    assert isinstance(mix, TensorChunk)
-    padded_mix = mix.padded(length + 2 * max_shift)
-    out = 0.0
+    padded_mix = pad_symmetrically(mix, length + 2 * max_shift).to(device)
+
     for shift_idx in range(shifts):
-        offset = random.randint(0, max_shift)
-        shifted = TensorChunk(padded_mix, offset, length + max_shift - offset)
-        kwargs["callback"] = None
+        offset = max_shift // (shift_idx + 1)
 
         if split:
-            res = apply_model_split(model, shifted, **kwargs, callback_arg=callback_arg)
+            res = apply_model_split(model, padded_mix, tensor_offset=offset, tensor_length=length + max_shift - offset, **kwargs, callback_arg=callback_arg)
         else:
-            res = apply_model(model, shifted, **kwargs, callback_arg=callback_arg)
+            res = apply_model(model, padded_mix, tensor_offset=offset, tensor_length=length + max_shift - offset, **kwargs, callback_arg=callback_arg)
 
-        shifted_out = res
-        out += shifted_out[..., max_shift - offset :]
+        out += res[..., max_shift - offset : length + max_shift - offset]
     out /= shifts
-    assert isinstance(out, torch.Tensor)
     return out
 
 
@@ -401,8 +289,12 @@ def separate_tensor(
 
     device = "mps"
     mix = wav.unsqueeze(0)
+    transition_power = 1.0
+    assert transition_power >= 1, "transition_power < 1 leads to weird behavior."
 
-    out = torch.zeros((mix.shape[0], 4, mix.shape[1], mix.shape[2]))
+    batch, channels, length = mix.shape
+    out = torch.zeros((batch, len(model.sources), channels, length)).to(device)
+
     totals = [0.0] * len(model.sources)
     for sub_model, model_weights in zip(model.models, model.weights):
         sub_model.to(device)
@@ -414,6 +306,7 @@ def separate_tensor(
             shifts=1,
             split=True,
             overlap=0.25,
+            transition_power=transition_power,
             device=device,
             num_workers=0,
             callback=None,
