@@ -227,9 +227,8 @@ def run_model(
 ):
     batch, channels, length = mix.shape
     out = torch.zeros((batch, len(model.sources), channels, length)).to(mix.device)
-    totals = torch.zeros((len(model.sources),))
 
-    for sub_model, model_weights in zip(model.models, model.weights):
+    for sub_model, _ in zip(model.models, model.weights):
         shift_out = torch.zeros((batch, len(sub_model.sources), channels, length)).to(
             mix.device
         )
@@ -256,8 +255,8 @@ def run_model(
             split_out = torch.zeros(
                 batch, len(sub_model.sources), channels, shift_length
             ).to(mix.device)
-
             split_sum_weight = torch.zeros(shift_length).to(mix.device)
+
             for inner_offset in range(
                 0, shift_length, int((1 - split_overlap) * split_segment_length)
             ):
@@ -268,10 +267,8 @@ def run_model(
                     batch, len(sub_model.sources), channels, split_length
                 ).to(mix.device)
 
-                valid_length = int(split_segment * sub_model.samplerate)
-
                 split_padded_mix = pad_symmetrically(
-                    mix, valid_length, offset=split_offset, length=split_length
+                    mix, split_segment_length, offset=split_offset, length=split_length
                 ).to(mix.device)
 
                 with torch.no_grad():
@@ -279,13 +276,12 @@ def run_model(
 
                 model_out = center_trim(model_out, split_length)
 
-                chunk_length = model_out.shape[-1]
-                split_out[..., inner_offset : inner_offset + split_segment_length] += (
-                    split_weight[:chunk_length] * model_out
+                split_out[..., inner_offset : inner_offset + split_length] += (
+                    split_weight[:split_length] * model_out
                 )
-                split_sum_weight[
-                    inner_offset : inner_offset + split_segment_length
-                ] += split_weight[:chunk_length]
+                split_sum_weight[inner_offset : inner_offset + split_length] += (
+                    split_weight[:split_length]
+                )
             split_out /= split_sum_weight
 
             shift_out += split_out[
@@ -293,14 +289,7 @@ def run_model(
             ]
 
         shift_out /= shifts
-
-        for k, inst_weight in enumerate(model_weights):
-            shift_out[:, k, :, :] *= inst_weight
-            totals[k] += inst_weight
         out += shift_out
-
-    for k in range(out.shape[1]):
-        out[:, k, :, :] /= totals[k]
 
     return out
 
