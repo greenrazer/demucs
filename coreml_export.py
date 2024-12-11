@@ -355,71 +355,6 @@ def apply_model_shifts(
     return out
 
 
-def apply_bag_of_models(
-    model,
-    mix,
-    shifts: int = 1,
-    split: bool = True,
-    overlap: float = 0.25,
-    transition_power: float = 1.0,
-    progress: bool = False,
-    device=None,
-    num_workers: int = 0,
-    segment: Optional[float] = None,
-    pool=None,
-    lock=None,
-    callback: Optional[Callable[[dict], None]] = None,
-    callback_arg: Optional[dict] = None,
-):
-    pool = DummyPoolExecutor()
-    lock = Lock()
-    kwargs = {
-        "shifts": shifts,
-        "split": split,
-        "overlap": overlap,
-        "transition_power": transition_power,
-        "progress": progress,
-        "device": device,
-        "pool": pool,
-        "segment": segment,
-        "lock": lock,
-    }
-
-    out: Union[float, torch.Tensor]
-    res: Union[float, torch.Tensor]
-
-    estimates: Union[float, torch.Tensor] = 0.0
-    totals = [0.0] * len(model.sources)
-    callback_arg["models"] = len(model.models)
-    for sub_model, model_weights in zip(model.models, model.weights):
-        kwargs["callback"] = None
-        original_model_device = next(iter(sub_model.parameters())).device
-        sub_model.to(device)
-
-        if shifts:
-            res = apply_model_shifts(
-                sub_model, mix, **kwargs, callback_arg=callback_arg
-            )
-        elif split:
-            res = apply_model_split(sub_model, mix, **kwargs, callback_arg=callback_arg)
-        else:
-            res = apply_model(sub_model, mix, **kwargs, callback_arg=callback_arg)
-
-        out = res
-        sub_model.to(original_model_device)
-        for k, inst_weight in enumerate(model_weights):
-            out[:, k, :, :] *= inst_weight
-            totals[k] += inst_weight
-        estimates += out
-        del out
-        callback_arg["model_idx_in_bag"] += 1
-
-    assert isinstance(estimates, torch.Tensor)
-    for k in range(estimates.shape[1]):
-        estimates[:, k, :, :] /= totals[k]
-    return estimates
-
-
 def convert_audio_channels(wav, channels=2):
     """Convert audio to the given number of channels."""
     *shape, src_channels, length = wav.shape
@@ -464,26 +399,40 @@ def separate_tensor(
     wav -= ref.mean()
     wav /= ref.std() + 1e-8
 
-    out = apply_bag_of_models(
-        model,
-        wav[None],
-        segment=None,
-        shifts=1,
-        split=True,
-        overlap=0.25,
-        device="mps",
-        num_workers=0,
-        callback=None,
-        callback_arg={
-            "audio_length": wav.shape[1],
-            "model_idx_in_bag": 0,
-            "shift_idx": 0,
-            "segment_offset": 0,
-        },
-        progress=False,
-    )
-    if out is None:
-        raise KeyboardInterrupt
+    device = "mps"
+    mix = wav.unsqueeze(0)
+
+    out = torch.zeros((mix.shape[0], 4, mix.shape[1], mix.shape[2]))
+    totals = [0.0] * len(model.sources)
+    for sub_model, model_weights in zip(model.models, model.weights):
+        sub_model.to(device)
+
+        res = apply_model_shifts(
+            sub_model,
+            mix,
+            segment=None,
+            shifts=1,
+            split=True,
+            overlap=0.25,
+            device=device,
+            num_workers=0,
+            callback=None,
+            callback_arg={
+                "audio_length": wav.shape[1],
+                "model_idx_in_bag": 0,
+                "shift_idx": 0,
+                "segment_offset": 0,
+            },
+            progress=False,
+        )
+
+        for k, inst_weight in enumerate(model_weights):
+            res[:, k, :, :] *= inst_weight
+            totals[k] += inst_weight
+        out += res
+
+    for k in range(out.shape[1]):
+        out[:, k, :, :] /= totals[k]
 
     # un-normalized
     out *= ref.std() + 1e-8
