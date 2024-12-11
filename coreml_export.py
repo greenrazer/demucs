@@ -3,14 +3,13 @@ from demucs.api import AudioFile
 
 import copy
 from pathlib import Path
-import random
-from threading import Lock
-from typing import Callable, Dict, Optional, Tuple, Union
+from typing import Dict, Literal, Optional, Tuple, Union
 import torch
 from torch.nn import functional as F
 import subprocess
 import torchaudio
 import julius
+import lameenc
 
 
 def _replace_dict(_dict, *subs) -> dict:
@@ -328,6 +327,73 @@ def _load_audio(model, track: Path):
         )
     return wav
 
+def prevent_clip(wav, mode='rescale'):
+    """
+    different strategies for avoiding raw clipping.
+    """
+    if mode is None or mode == 'none':
+        return wav
+    assert wav.dtype.is_floating_point, "too late for clipping"
+    if mode == 'rescale':
+        wav = wav / max(1.01 * wav.abs().max(), 1)
+    elif mode == 'clamp':
+        wav = wav.clamp(-0.99, 0.99)
+    elif mode == 'tanh':
+        wav = torch.tanh(wav)
+    else:
+        raise ValueError(f"Invalid mode {mode}")
+    return wav
+
+def i16_pcm(wav):
+    """Convert audio to 16 bits integer PCM format."""
+    if wav.dtype.is_floating_point:
+        return (wav.clamp_(-1, 1) * (2**15 - 1)).short()
+    else:
+        return wav
+
+def encode_mp3(wav, path, samplerate=44100, bitrate=320, quality=2, verbose=False):
+    """Save given audio as mp3. This should work on all OSes."""
+    C, T = wav.shape
+    wav = i16_pcm(wav)
+    encoder = lameenc.Encoder()
+    encoder.set_bit_rate(bitrate)
+    encoder.set_in_sample_rate(samplerate)
+    encoder.set_channels(C)
+    encoder.set_quality(quality)  # 2-highest, 7-fastest
+    if not verbose:
+        encoder.silence()
+    wav = wav.data.cpu()
+    wav = wav.transpose(0, 1).numpy()
+    mp3_data = encoder.encode(wav.tobytes())
+    mp3_data += encoder.flush()
+    with open(path, "wb") as f:
+        f.write(mp3_data)
+
+def save_audio(wav: torch.Tensor,
+               path: Union[str, Path],
+               samplerate: int,
+               bitrate: int = 320,
+               clip: Literal["rescale", "clamp", "tanh", "none"] = 'rescale',
+               bits_per_sample: Literal[16, 24, 32] = 16,
+               as_float: bool = False,
+               preset: Literal[2, 3, 4, 5, 6, 7] = 2):
+    wav = prevent_clip(wav, mode=clip)
+    path = Path(path)
+    suffix = path.suffix.lower()
+    if suffix == ".mp3":
+        encode_mp3(wav, path, samplerate, bitrate, preset, verbose=True)
+    elif suffix == ".wav":
+        if as_float:
+            bits_per_sample = 32
+            encoding = 'PCM_F'
+        else:
+            encoding = 'PCM_S'
+        torchaudio.save(str(path), wav, sample_rate=samplerate,
+                encoding=encoding, bits_per_sample=bits_per_sample)
+    elif suffix == ".flac":
+        torchaudio.save(str(path), wav, sample_rate=samplerate, bits_per_sample=bits_per_sample)
+    else:
+        raise ValueError(f"Invalid suffix for path: {suffix}")
 
 if __name__ == "__main__":
     filename = "test2.mp3"
@@ -339,7 +405,7 @@ if __name__ == "__main__":
     )
 
     for stem, audio_data in separated.items():
-        demucs.api.save_audio(
+        save_audio(
             audio_data,
             f"separated/coreml/{stem}_{filename}",
             samplerate=model.samplerate,
