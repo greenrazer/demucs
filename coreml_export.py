@@ -11,205 +11,6 @@ import torchaudio
 import julius
 import lameenc
 
-
-def _replace_dict(_dict, *subs) -> dict:
-    if _dict is None:
-        _dict = {}
-    else:
-        _dict = copy.copy(_dict)
-    for key, value in subs:
-        _dict[key] = value
-    return _dict
-
-
-class DummyPoolExecutor:
-    class DummyResult:
-        def __init__(self, func, _dict, *args, **kwargs):
-            self.func = func
-            self._dict = _dict
-            self.args = args
-            self.kwargs = kwargs
-
-        def result(self):
-            if self._dict["run"]:
-                return self.func(*self.args, **self.kwargs)
-            else:
-                raise Exception("placeholder")
-
-    def __init__(self, workers=0):
-        self._dict = {"run": True}
-
-    def submit(self, func, *args, **kwargs):
-        return DummyPoolExecutor.DummyResult(func, self._dict, *args, **kwargs)
-
-    def shutdown(self, *_, **__):
-        self._dict["run"] = False
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_value, exc_tb):
-        return
-
-
-def pad_symmetrically(tensor, target_length, offset=0, length=None):
-    total_length = tensor.shape[-1]
-
-    if length is None:
-        length = total_length - offset
-    else:
-        length = min(total_length - offset, length)
-
-    delta = target_length - length
-    total_length = tensor.shape[-1]
-    assert delta >= 0
-
-    start = offset - delta // 2
-    end = start + target_length
-
-    correct_start = max(0, start)
-    correct_end = min(total_length, end)
-
-    pad_left = correct_start - start
-    pad_right = end - correct_end
-
-    out = F.pad(tensor[..., correct_start:correct_end], (pad_left, pad_right))
-    return out
-
-
-def center_trim(tensor: torch.Tensor, reference: Union[torch.Tensor, int]):
-    """
-    Center trim `tensor` with respect to `reference`, along the last dimension.
-    `reference` can also be a number, representing the length to trim to.
-    If the size difference != 0 mod 2, the extra sample is removed on the right side.
-    """
-    ref_size: int
-    if isinstance(reference, torch.Tensor):
-        ref_size = reference.size(-1)
-    else:
-        ref_size = reference
-    delta = tensor.size(-1) - ref_size
-    if delta < 0:
-        raise ValueError("tensor must be larger than reference. " f"Delta is {delta}.")
-    if delta:
-        tensor = tensor[..., delta // 2 : -(delta - delta // 2)]
-    return tensor
-
-
-def apply_model(
-    model,
-    mix,
-    tensor_offset=0,
-    tensor_length=None,
-    segment: Optional[float] = None,
-) -> torch.Tensor:
-    if tensor_length is None:
-        tensor_length = mix.shape[-1]
-
-    batch, channels, length = mix.shape
-    out = torch.zeros(batch, len(model.sources), channels, tensor_length).to(mix.device)
-
-    valid_length: int
-    if segment is not None:
-        valid_length = int(segment * model.samplerate)
-    elif hasattr(model, "valid_length"):
-        valid_length = model.valid_length(tensor_length)
-    else:
-        valid_length = tensor_length
-
-    padded_mix = pad_symmetrically(
-        mix, valid_length, offset=tensor_offset, length=tensor_length
-    ).to(mix.device)
-
-    with torch.no_grad():
-        out = model(padded_mix)
-    return center_trim(out, tensor_length)
-
-
-def apply_model_split(
-    model,
-    mix,
-    tensor_offset=0,
-    tensor_length=None,
-    overlap: float = 0.25,
-    transition_power: float = 1.0,
-    segment: Optional[float] = None,
-):
-    batch, channels, length = mix.shape
-
-    out = torch.zeros(batch, len(model.sources), channels, tensor_length).to(mix.device)
-    sum_weight = torch.zeros(tensor_length).to(mix.device)
-
-    if segment is None:
-        segment = model.segment
-
-    segment_length: int = int(model.samplerate * segment)
-
-    weight = torch.cat(
-        [
-            torch.arange(1, segment_length // 2 + 1),
-            torch.arange(segment_length - segment_length // 2, 0, -1),
-        ]
-    ).to(mix.device)
-
-    weight = (weight / weight.max()) ** transition_power
-    for inner_offset in range(0, tensor_length, int((1 - overlap) * segment_length)):
-        model_out = apply_model(
-            model,
-            mix,
-            tensor_offset=tensor_offset + inner_offset,
-            tensor_length=min(tensor_length - inner_offset, segment_length),
-        )
-        chunk_length = model_out.shape[-1]
-        out[..., inner_offset : inner_offset + segment_length] += (
-            weight[:chunk_length] * model_out
-        )
-        sum_weight[inner_offset : inner_offset + segment_length] += weight[
-            :chunk_length
-        ]
-    out /= sum_weight
-    return out
-
-
-def apply_model_shifts(
-    model,
-    mix,
-    shifts: int = 1,
-    split: bool = True,
-    overlap: float = 0.25,
-    transition_power: float = 1.0,
-):
-    batch, channels, length = mix.shape
-    out = torch.zeros((batch, len(model.sources), channels, length)).to(mix.device)
-
-    max_shift = int(0.5 * model.samplerate)
-    padded_mix = pad_symmetrically(mix, length + 2 * max_shift).to(mix.device)
-
-    for shift_idx in range(shifts):
-        offset = max_shift // (shift_idx + 1)
-
-        if split:
-            res = apply_model_split(
-                model,
-                padded_mix,
-                tensor_offset=offset,
-                tensor_length=length + max_shift - offset,
-                overlap=overlap,
-                transition_power=transition_power,
-            )
-        else:
-            res = apply_model(
-                model,
-                padded_mix,
-                tensor_offset=offset,
-                tensor_length=length + max_shift - offset,
-            )
-
-        out += res[..., max_shift - offset : length + max_shift - offset]
-    out /= shifts
-    return out
-
-
 def convert_audio_channels(wav, channels=2):
     """Convert audio to the given number of channels."""
     *shape, src_channels, length = wav.shape
@@ -237,61 +38,44 @@ def convert_audio_channels(wav, channels=2):
         )
     return wav
 
+def pad_symmetrically(tensor, target_length, offset=0, length=None):
+    total_length = tensor.shape[-1]
 
-def separate_tensor(
-    model, wav: torch.Tensor, input_sample_rate: Optional[int] = None
-) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-    sample_rate = model.samplerate
-    audio_channels = model.audio_channels
+    if length is None:
+        length = total_length - offset
+    else:
+        length = min(total_length - offset, length)
 
-    if input_sample_rate is not None and input_sample_rate != sample_rate:
-        wav = convert_audio_channels(wav, audio_channels)
-        wav = julius.resample_frac(wav, input_sample_rate, sample_rate)
+    delta = target_length - length
+    total_length = tensor.shape[-1]
+    assert delta >= 0
 
-    # normalize
-    ref = wav.mean(0)
-    wav -= ref.mean()
-    wav /= ref.std() + 1e-8
+    start = offset - delta // 2
+    end = start + target_length
 
-    device = "mps"
-    mix = wav.unsqueeze(0)
-    transition_power = 1.0
-    assert transition_power >= 1, "transition_power < 1 leads to weird behavior."
+    correct_start = max(0, start)
+    correct_end = min(total_length, end)
 
-    batch, channels, length = mix.shape
-    out = torch.zeros((batch, len(model.sources), channels, length)).to(device)
+    pad_left = correct_start - start
+    pad_right = end - correct_end
 
-    totals = [0.0] * len(model.sources)
-    for sub_model, model_weights in zip(model.models, model.weights):
-        sub_model.to(device)
+    out = F.pad(tensor[..., correct_start:correct_end], (pad_left, pad_right))
+    return out.to(tensor.device)
 
-        res = apply_model_shifts(
-            sub_model,
-            mix,
-            shifts=1,
-            split=True,
-            overlap=0.25,
-            transition_power=transition_power,
-        )
+def center_trim(tensor: torch.Tensor, reference: Union[torch.Tensor, int]):
+    ref_size: int
+    if isinstance(reference, torch.Tensor):
+        ref_size = reference.size(-1)
+    else:
+        ref_size = reference
+    delta = tensor.size(-1) - ref_size
+    if delta < 0:
+        raise ValueError("tensor must be larger than reference. " f"Delta is {delta}.")
+    if delta:
+        tensor = tensor[..., delta // 2 : -(delta - delta // 2)]
+    return tensor
 
-        for k, inst_weight in enumerate(model_weights):
-            res[:, k, :, :] *= inst_weight
-            totals[k] += inst_weight
-        out += res
-
-    for k in range(out.shape[1]):
-        out[:, k, :, :] /= totals[k]
-
-    # un-normalized
-    out *= ref.std() + 1e-8
-    out += ref.mean()
-    wav *= ref.std() + 1e-8
-    wav += ref.mean()
-
-    return (wav, dict(zip(model.sources, out[0])))
-
-
-def _load_audio(model, track: Path):
+def load_audio(model, track: Path):
     sample_rate = model.samplerate
     audio_channels = model.audio_channels
 
@@ -395,14 +179,126 @@ def save_audio(wav: torch.Tensor,
     else:
         raise ValueError(f"Invalid suffix for path: {suffix}")
 
+def preprocess(wav: torch.Tensor, input_sample_rate: int, model_sample_rate: int, audio_channels: int):
+    if input_sample_rate is not None and input_sample_rate != model_sample_rate:
+        wav = convert_audio_channels(wav, audio_channels)
+        wav = julius.resample_frac(wav, input_sample_rate, model_sample_rate)
+
+    # normalize
+    ref = wav.mean(0)
+    wav -= ref.mean()
+    wav /= ref.std() + 1e-8
+
+    mix = wav.unsqueeze(0)
+
+    return (ref, mix)
+
+def run_model(
+    model, 
+    mix: torch.Tensor, 
+    shifts: int = 1,
+    split: bool = True,
+    split_overlap: float = 0.25,
+    split_transition_power: float = 1.0,
+    split_segment: Optional[float] = None
+):
+    batch, channels, length = mix.shape
+    out = torch.zeros((batch, len(model.sources), channels, length)).to(mix.device)
+    totals = torch.zeros((len(model.sources),))
+
+    for sub_model, model_weights in zip(model.models, model.weights):
+        shift_out = torch.zeros((batch, len(sub_model.sources), channels, length)).to(mix.device)
+
+        max_shift = int(0.5 * sub_model.samplerate)
+        padded_mix = pad_symmetrically(mix, length + 2 * max_shift)
+
+        for shift_idx in range(shifts):
+            shift_offset = max_shift // (shift_idx + 1)
+            shift_length = length + max_shift - shift_offset
+
+            if split_segment is None:
+                split_segment = sub_model.segment
+            split_segment_length: int = int(sub_model.samplerate * split_segment)
+            split_weight = torch.cat(
+                [
+                    torch.arange(1, split_segment_length // 2 + 1),
+                    torch.arange(split_segment_length - split_segment_length // 2, 0, -1),
+                ]
+            ).to(mix.device)
+            split_weight = (split_weight / split_weight.max()) ** split_transition_power
+
+            split_out = torch.zeros(batch, len(sub_model.sources), channels, shift_length).to(mix.device)
+            
+            split_sum_weight = torch.zeros(shift_length).to(mix.device)
+            for inner_offset in range(0, shift_length, int((1 - split_overlap) * split_segment_length)):
+                split_offset = shift_offset + inner_offset
+                split_length = min(shift_length - inner_offset, split_segment_length)
+
+                model_out = torch.zeros(batch, len(sub_model.sources), channels, split_length).to(mix.device)
+
+                if split_segment is not None:
+                    valid_length = int(split_segment * sub_model.samplerate)
+                elif hasattr(model, "valid_length"):
+                    valid_length = sub_model.valid_length(split_length)
+                else:
+                    valid_length = split_length
+
+                split_padded_mix = pad_symmetrically(padded_mix, valid_length, offset=split_offset, length=split_length).to(mix.device)
+
+                with torch.no_grad():
+                    model_out = sub_model(split_padded_mix)
+
+                model_out = center_trim(model_out, split_length)
+
+                chunk_length = model_out.shape[-1]
+                split_out[..., inner_offset : inner_offset + split_segment_length] += (
+                    split_weight[:chunk_length] * model_out
+                )
+                split_sum_weight[inner_offset : inner_offset + split_segment_length] += split_weight[
+                    :chunk_length
+                ]
+            split_out /= split_sum_weight
+
+
+            shift_out += split_out[..., max_shift - shift_offset : length + max_shift - shift_offset]
+        
+        shift_out /= shifts
+
+        for k, inst_weight in enumerate(model_weights):
+            shift_out[:, k, :, :] *= inst_weight
+            totals[k] += inst_weight
+        out += shift_out
+
+    for k in range(out.shape[1]):
+        out[:, k, :, :] /= totals[k]
+    
+    return out
+
+def postprocess(output: torch.Tensor, ref: torch.Tensor):
+    # un-normalized
+    output *= ref.std() + 1e-8
+    output += ref.mean()
+
+    return dict(zip(model.sources, output[0]))
+
 if __name__ == "__main__":
     filename = "test2.mp3"
+    device = "mps"
 
-    model = torch.load("models/htdemucs.pt")
+    model = torch.load("models/htdemucs.pt").to(device)
+    wav = load_audio(model, filename).to(device)
 
-    wav, separated = separate_tensor(
-        model, _load_audio(model, filename).to("mps"), model.samplerate
+    ref, mix = preprocess(wav, model.samplerate, model.samplerate, model.audio_channels)
+    output = run_model(
+        model, 
+        mix, 
+        shifts = 1,
+        split = True,
+        split_overlap = 0.25,
+        split_transition_power = 1.0,
+        split_segment = None
     )
+    separated = postprocess(output, ref)
 
     for stem, audio_data in separated.items():
         save_audio(
