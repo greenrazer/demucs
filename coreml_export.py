@@ -4,7 +4,7 @@ import tempfile
 import numpy as np
 
 from pathlib import Path
-from typing import Dict, Literal, Optional, Tuple, Union
+from typing import Dict, List, Literal, Optional, Tuple, Union
 import torch
 from torch.nn import functional as F
 import subprocess
@@ -13,6 +13,8 @@ import julius
 import lameenc
 import subprocess
 import json
+
+# region File Manager
 
 @contextmanager
 def temp_filenames(count: int, delete=True):
@@ -145,73 +147,6 @@ class AudioFile:
         return wav
 
 
-
-def convert_audio_channels(wav, channels=2):
-    """Convert audio to the given number of channels."""
-    *shape, src_channels, length = wav.shape
-    if src_channels == channels:
-        pass
-    elif channels == 1:
-        # Case 1:
-        # The caller asked 1-channel audio, but the stream have multiple
-        # channels, downmix all channels.
-        wav = wav.mean(dim=-2, keepdim=True)
-    elif src_channels == 1:
-        # Case 2:
-        # The caller asked for multiple channels, but the input file have
-        # one single channel, replicate the audio over all channels.
-        wav = wav.expand(*shape, channels, length)
-    elif src_channels >= channels:
-        # Case 3:
-        # The caller asked for multiple channels, and the input file have
-        # more channels than requested. In that case return the first channels.
-        wav = wav[..., :channels, :]
-    else:
-        # Case 4: What is a reasonable choice here?
-        raise ValueError(
-            "The audio file has less channels than requested but is not mono."
-        )
-    return wav
-
-
-def pad_symmetrically(tensor, target_length, offset=0, length=None):
-    total_length = tensor.shape[-1]
-
-    if length is None:
-        length = total_length - offset
-    else:
-        length = min(total_length - offset, length)
-
-    delta = target_length - length
-    assert delta >= 0
-
-    start = offset - delta // 2
-    end = start + target_length
-
-    correct_start = max(0, start)
-    correct_end = min(total_length, end)
-
-    pad_left = correct_start - start
-    pad_right = end - correct_end
-
-    out = F.pad(tensor[..., correct_start:correct_end], (pad_left, pad_right))
-    return out.to(tensor.device)
-
-
-def center_trim(tensor: torch.Tensor, reference: Union[torch.Tensor, int]):
-    ref_size: int
-    if isinstance(reference, torch.Tensor):
-        ref_size = reference.size(-1)
-    else:
-        ref_size = reference
-    delta = tensor.size(-1) - ref_size
-    if delta < 0:
-        raise ValueError("tensor must be larger than reference. " f"Delta is {delta}.")
-    if delta:
-        tensor = tensor[..., delta // 2 : -(delta - delta // 2)]
-    return tensor
-
-
 def load_audio(model, track: Path):
     sample_rate = model.samplerate
     audio_channels = model.audio_channels
@@ -329,25 +264,72 @@ def save_audio(
     else:
         raise ValueError(f"Invalid suffix for path: {suffix}")
 
+# endregion File Manager
 
-def preprocess(
-    wav: torch.Tensor,
-    input_sample_rate: int,
-    model_sample_rate: int,
-    audio_channels: int,
-):
-    if input_sample_rate is not None and input_sample_rate != model_sample_rate:
-        wav = convert_audio_channels(wav, audio_channels)
-        wav = julius.resample_frac(wav, input_sample_rate, model_sample_rate)
+def convert_audio_channels(wav, channels=2):
+    """Convert audio to the given number of channels."""
+    *shape, src_channels, length = wav.shape
+    if src_channels == channels:
+        pass
+    elif channels == 1:
+        # Case 1:
+        # The caller asked 1-channel audio, but the stream have multiple
+        # channels, downmix all channels.
+        wav = wav.mean(dim=-2, keepdim=True)
+    elif src_channels == 1:
+        # Case 2:
+        # The caller asked for multiple channels, but the input file have
+        # one single channel, replicate the audio over all channels.
+        wav = wav.expand(*shape, channels, length)
+    elif src_channels >= channels:
+        # Case 3:
+        # The caller asked for multiple channels, and the input file have
+        # more channels than requested. In that case return the first channels.
+        wav = wav[..., :channels, :]
+    else:
+        # Case 4: What is a reasonable choice here?
+        raise ValueError(
+            "The audio file has less channels than requested but is not mono."
+        )
+    return wav
 
-    # normalize
-    ref = wav.mean(0)
-    wav -= ref.mean()
-    wav /= ref.std() + 1e-8
 
-    mix = wav.unsqueeze(0)
+def pad_symmetrically(tensor, target_length, offset=0, length=None):
+    total_length = tensor.shape[-1]
 
-    return (ref, mix)
+    if length is None:
+        length = total_length - offset
+    else:
+        length = min(total_length - offset, length)
+
+    delta = target_length - length
+    assert delta >= 0
+
+    start = offset - delta // 2
+    end = start + target_length
+
+    correct_start = max(0, start)
+    correct_end = min(total_length, end)
+
+    pad_left = correct_start - start
+    pad_right = end - correct_end
+
+    out = F.pad(tensor[..., correct_start:correct_end], (pad_left, pad_right))
+    return out.to(tensor.device)
+
+
+def center_trim(tensor: torch.Tensor, reference: Union[torch.Tensor, int]):
+    ref_size: int
+    if isinstance(reference, torch.Tensor):
+        ref_size = reference.size(-1)
+    else:
+        ref_size = reference
+    delta = tensor.size(-1) - ref_size
+    if delta < 0:
+        raise ValueError("tensor must be larger than reference. " f"Delta is {delta}.")
+    if delta:
+        tensor = tensor[..., delta // 2 : -(delta - delta // 2)]
+    return tensor
 
 class Shifts:
     def __init__(self, length, max_shift, num_shifts):
@@ -374,10 +356,12 @@ class Chunks:
         self.shift_length = shift_length
         self.chunk_overlap = chunk_overlap
         self.chunk_segment_length = chunk_segment_length
-        self.step_size = int((1 - chunk_overlap) * chunk_segment_length)
         self.max_shift = max_shift
         self.shift_offset = shift_offset
         self.current_offset = 0
+
+        self.step_size = int((1 - chunk_overlap) * chunk_segment_length)
+        self.shift_size = min(self.length + (2 * self.max_shift) - self.shift_offset, self.shift_length)
     
     def __iter__(self):
         return self
@@ -386,12 +370,31 @@ class Chunks:
         if self.current_offset < self.shift_length:
             inner_offset = self.current_offset
             chunk_offset = self.current_offset - self.max_shift + self.shift_offset
-            chunk_length = min(self.length - self.current_offset, self.chunk_segment_length)
+            chunk_length = min(self.shift_size - self.current_offset, self.chunk_segment_length)
 
             self.current_offset += self.step_size
             return inner_offset, chunk_offset, chunk_length
         else:
             raise StopIteration
+
+def preprocess(
+    wav: torch.Tensor,
+    input_sample_rate: int,
+    model_sample_rate: int,
+    audio_channels: int,
+):
+    if input_sample_rate is not None and input_sample_rate != model_sample_rate:
+        wav = convert_audio_channels(wav, audio_channels)
+        wav = julius.resample_frac(wav, input_sample_rate, model_sample_rate)
+
+    # normalize
+    ref = wav.mean(0)
+    wav -= ref.mean()
+    wav /= ref.std() + 1e-8
+
+    mix = wav.unsqueeze(0)
+
+    return (ref, mix)
 
 def run_model(
     model,
@@ -439,12 +442,12 @@ def run_model(
 
     return out
 
-def postprocess(output: torch.Tensor, ref: torch.Tensor):
+def postprocess(output: torch.Tensor, ref: torch.Tensor, sources: List[str]):
     # un-normalized
     output *= ref.std() + 1e-8
     output += ref.mean()
 
-    return dict(zip(model.sources, output[0]))
+    return dict(zip(sources, output[0]))
 
 if __name__ == "__main__":
     torch.set_grad_enabled(False)
@@ -464,11 +467,12 @@ if __name__ == "__main__":
         chunk_segment=model.segment,
     )
 
-    separated = postprocess(output, ref)
+    separated = postprocess(output, ref, model.sources)
 
     for stem, audio_data in separated.items():
         save_audio(
+            # audio_data[..., -model.samplerate*2:],
             audio_data,
-            f"separated/coreml/{stem}_{filename}",
+            f"separated/coreml-shifts2/{stem}_{filename}",
             samplerate=model.samplerate,
         )
