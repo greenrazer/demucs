@@ -215,6 +215,46 @@ def preprocess(
 
     return (ref, mix)
 
+class Shifts:
+    def __init__(self, num_shifts, max_shift, length):
+        self.num_shifts = num_shifts
+        self.max_shift = max_shift
+        self.length = length
+        self.current_shift = 0
+    
+    def __iter__(self):
+        return self
+    
+    def __next__(self):
+        if self.current_shift < self.num_shifts:
+            shift_offset = self.max_shift // (self.current_shift + 1)
+            shift_length = self.length + self.max_shift - shift_offset
+            self.current_shift += 1
+            return shift_offset, shift_length
+        else:
+            raise StopIteration
+
+class Splits:
+    def __init__(self, length, shift_length, split_overlap, split_segment_length):
+        self.length = length
+        self.shift_length = shift_length
+        self.split_overlap = split_overlap
+        self.split_segment_length = split_segment_length
+        self.step_size = int((1 - split_overlap) * split_segment_length)
+        self.current_offset = 0
+    
+    def __iter__(self):
+        return self
+    
+    def __next__(self):
+        if self.current_offset < self.shift_length:
+            split_offset = self.current_offset
+            split_length = min(self.length - self.current_offset, self.split_segment_length)
+
+            self.current_offset += self.step_size
+            return split_offset, split_length
+        else:
+            raise StopIteration
 
 def run_model(
     model,
@@ -223,76 +263,63 @@ def run_model(
     split: bool = True,
     split_overlap: float = 0.25,
     split_transition_power: float = 1.0,
-    split_segment: Optional[float] = None,
+    split_segment: float = 39/5,
 ):
+
     batch, channels, length = mix.shape
     out = torch.zeros((batch, len(model.sources), channels, length)).to(mix.device)
+    max_shift = int(0.5 * model.samplerate)
 
-    for sub_model, _ in zip(model.models, model.weights):
-        shift_out = torch.zeros((batch, len(sub_model.sources), channels, length)).to(
-            mix.device
-        )
+    for shift_offset, shift_length in Shifts(shifts, max_shift , length):
 
-        max_shift = int(0.5 * sub_model.samplerate)
-
-        for shift_idx in range(shifts):
-            shift_offset = max_shift // (shift_idx + 1)
-            shift_length = length + max_shift - shift_offset
-
-            if split_segment is None:
-                split_segment = sub_model.segment
-            split_segment_length: int = int(sub_model.samplerate * split_segment)
-            split_weight = torch.cat(
-                [
-                    torch.arange(1, split_segment_length // 2 + 1),
-                    torch.arange(
-                        split_segment_length - split_segment_length // 2, 0, -1
-                    ),
-                ]
-            ).to(mix.device)
-            split_weight = (split_weight / split_weight.max()) ** split_transition_power
-
-            split_out = torch.zeros(
-                batch, len(sub_model.sources), channels, shift_length
-            ).to(mix.device)
-            split_sum_weight = torch.zeros(shift_length).to(mix.device)
-
-            for inner_offset in range(
-                0, shift_length, int((1 - split_overlap) * split_segment_length)
-            ):
-                split_offset = inner_offset
-                split_length = min(length - inner_offset, split_segment_length)
-
-                model_out = torch.zeros(
-                    batch, len(sub_model.sources), channels, split_length
-                ).to(mix.device)
-
-                split_padded_mix = pad_symmetrically(
-                    mix, split_segment_length, offset=split_offset, length=split_length
-                ).to(mix.device)
-
-                with torch.no_grad():
-                    model_out = sub_model(split_padded_mix)
-
-                model_out = center_trim(model_out, split_length)
-
-                split_out[..., inner_offset : inner_offset + split_length] += (
-                    split_weight[:split_length] * model_out
-                )
-                split_sum_weight[inner_offset : inner_offset + split_length] += (
-                    split_weight[:split_length]
-                )
-            split_out /= split_sum_weight
-
-            shift_out += split_out[
-                ..., max_shift - shift_offset : length + max_shift - shift_offset
+        split_segment_length: int = int(model.samplerate * split_segment)
+        split_weight = torch.cat(
+            [
+                torch.arange(1, split_segment_length // 2 + 1),
+                torch.arange(
+                    split_segment_length - split_segment_length // 2, 0, -1
+                ),
             ]
+        ).to(mix.device)
+        split_weight = (split_weight / split_weight.max()) ** split_transition_power
 
-        shift_out /= shifts
-        out += shift_out
+        split_out = torch.zeros(batch, len(model.sources), channels, shift_length).to(mix.device)
+        split_sum_weight = torch.zeros(shift_length).to(mix.device)
+
+        for inner_offset in range(
+            0, shift_length, int((1 - split_overlap) * split_segment_length)
+        ):
+            split_offset = inner_offset
+            split_length = min(length - inner_offset, split_segment_length)
+
+            model_out = torch.zeros(
+                batch, len(model.sources), channels, split_length
+            ).to(mix.device)
+
+            split_padded_mix = pad_symmetrically(
+                mix, split_segment_length, offset=split_offset-max_shift+shift_offset, length=split_length
+            ).to(mix.device)
+
+            with torch.no_grad():
+                model_out = model(split_padded_mix)
+
+            model_out = center_trim(model_out, split_length)
+
+            split_out[..., inner_offset : inner_offset + split_length] += (
+                split_weight[:split_length] * model_out
+            )
+            split_sum_weight[inner_offset : inner_offset + split_length] += (
+                split_weight[:split_length]
+            )
+        split_out /= split_sum_weight
+
+        out += split_out[
+            ..., max_shift - shift_offset : shift_length + max_shift - shift_offset
+        ]
+
+    out /= shifts
 
     return out
-
 
 def postprocess(output: torch.Tensor, ref: torch.Tensor):
     # un-normalized
@@ -301,24 +328,24 @@ def postprocess(output: torch.Tensor, ref: torch.Tensor):
 
     return dict(zip(model.sources, output[0]))
 
-
 if __name__ == "__main__":
     filename = "test2.mp3"
     device = "mps"
 
-    model = torch.load("models/htdemucs.pt").to(device)
+    model = torch.load("models/htdemucs.pt").models[0].to(device)
     wav = load_audio(model, filename).to(device)
 
     ref, mix = preprocess(wav, model.samplerate, model.samplerate, model.audio_channels)
     output = run_model(
         model,
         mix,
-        shifts=1,
+        shifts=2,
         split=True,
         split_overlap=0.25,
         split_transition_power=1.0,
-        split_segment=None,
+        split_segment=model.segment,
     )
+
     separated = postprocess(output, ref)
 
     for stem, audio_data in separated.items():
