@@ -313,31 +313,6 @@ def convert_audio_channels(wav, channels=2):
         )
     return wav
 
-
-def pad_symmetrically(tensor, target_length, offset=0, length=None):
-    total_length = tensor.shape[-1]
-
-    if length is None:
-        length = total_length - offset
-    else:
-        length = min(total_length - offset, length)
-
-    delta = target_length - length
-    assert delta >= 0
-
-    start = offset - delta // 2
-    end = start + target_length
-
-    correct_start = max(0, start)
-    correct_end = min(total_length, end)
-
-    pad_left = correct_start - start
-    pad_right = end - correct_end
-
-    out = F.pad(tensor[..., correct_start:correct_end], (pad_left, pad_right))
-    return out.to(tensor.device)
-
-
 def center_trim(tensor: torch.Tensor, reference: Union[torch.Tensor, int]):
     ref_size: int
     if isinstance(reference, torch.Tensor):
@@ -470,11 +445,21 @@ def run_model(
             chunk_overlap,
             chunk_segment_length,
         ):
-            chunk_padded_mix = pad_symmetrically(
-                mix, chunk_segment_length, offset=chunk_offset, length=chunk_length
-            ).to(mix.device)
+            pad_len = min(length - chunk_offset, chunk_length)
+            delta = chunk_segment_length - pad_len
 
-            model_out = model(chunk_padded_mix)
+            start = chunk_offset - delta // 2
+            end = start + chunk_segment_length
+
+            correct_start = max(0, start)
+            correct_end = min(length, end)
+
+            pad_left = correct_start - start
+            pad_right = end - correct_end
+
+            padded_chunk = F.pad(mix[..., correct_start:correct_end], (pad_left, pad_right))
+
+            model_out = model(padded_chunk)
 
             model_out = center_trim(model_out, chunk_length)
 
@@ -508,76 +493,7 @@ if __name__ == "__main__":
     filename = "test2.mp3"
     device = "mps"
 
-    # import demucs
-    # separator = demucs.api.Separator()s
-
-    model = HTDemucs.from_pretrained(
-        "KeighBee/demucs",
-        # sources = ['drums', 'bass', 'other', 'vocals'],
-        # audio_channels = 2,
-        # channels = 48,
-        # channels_time = None,
-        # growth = 2,
-        # nfft = 4096,
-        # wiener_iters = 0,
-        # end_iters = 0,
-        # wiener_residual = False,
-        # cac = True,
-        # depth = 4,
-        # rewrite = True,
-        # multi_freqs = [],
-        # multi_freqs_depth = 3,
-        # freq_emb = 0.2,
-        # emb_scale = 10,
-        # emb_smooth = True,
-        # kernel_size = 8,
-        # time_stride = 2,
-        # stride = 4,
-        # context = 1,
-        # context_enc = 0,
-        # norm_starts = 4,
-        # norm_groups = 4,
-        # dconv_mode = 3,
-        # dconv_depth = 2,
-        # dconv_comp = 8,
-        # dconv_init = 0.001,
-        # bottom_channels = 512,
-        # t_layers = 5,
-        # t_hidden_scale = 4.0,
-        # t_heads = 8,
-        # t_dropout = 0.02,
-        # t_max_positions = 10000,
-        # t_norm_in = True,
-        # t_norm_in_group = False,
-        # t_group_norm = False,
-        # t_norm_first = True,
-        # t_norm_out = True,
-        # t_max_period = 10000.0,
-        # t_weight_decay = 0.0,
-        # t_lr = None,
-        # t_layer_scale = True,
-        # t_gelu = True,
-        # t_weight_pos_embed = 1.0,
-        # t_sin_random_shift = 0,
-        # t_cape_mean_normalize = True,
-        # t_cape_augment = True,
-        # t_cape_glob_loc_scale = [5000.0, 1.0, 1.4],
-        # t_sparse_self_attn = False,
-        # t_sparse_cross_attn = False,
-        # t_mask_random_seed = 42,
-        # t_sparse_attn_window = 400,
-        # t_global_window = 100,
-        # t_sparsity = 0.95,
-        # t_auto_sparsity = False,
-        # t_cross_first = False,
-        # rescale = 0.1,
-        # samplerate = 44100,
-        # segment = 39/5,
-        # use_train_segment = True,
-    ).to(device)
-    # model = torch.load("models/htdemucs.pt").models[0].to(device)
-    # print(type(model))
-    # model.push_to_hub("KeighBee/demucs")
+    model = HTDemucs.from_pretrained("KeighBee/demucs").to(device)
 
     wav = load_audio(model, filename).to(device)
 
