@@ -15,6 +15,7 @@ from torch import nn
 from torch.nn import functional as F
 from fractions import Fraction
 from einops import rearrange
+from huggingface_hub import PyTorchModelHubMixin
 
 from .transformer import CrossTransformerEncoder
 
@@ -24,7 +25,10 @@ from .spec import spectro, ispectro
 from .hdemucs import pad1d, ScaledEmbedding, HEncLayer, MultiWrap, HDecLayer
 
 
-class HTDemucs(nn.Module):
+class HTDemucs(
+        nn.Module,
+        PyTorchModelHubMixin
+    ):
     """
     Spectrogram and hybrid Demucs model.
     The spectrogram model has the same structure as Demucs, except the first few layers are over the
@@ -55,7 +59,7 @@ class HTDemucs(nn.Module):
     @capture_init
     def __init__(
         self,
-        sources,
+        sources=["drums", "bass", "other", "vocals"],
         # Channels
         audio_channels=2,
         channels=48,
