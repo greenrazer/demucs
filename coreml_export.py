@@ -357,12 +357,15 @@ class Shifts:
         self.length = length
         self.current_shift = 0
 
+        spaced_floats = np.linspace(0, self.max_shift, self.num_shifts)
+        self.shifts = list(map(round, spaced_floats))
+
     def __iter__(self):
         return self
 
     def __next__(self):
         if self.current_shift < self.num_shifts:
-            shift_offset = self.max_shift // (self.current_shift + 1)
+            shift_offset = self.shifts[self.current_shift]
             shift_length = self.length + self.max_shift - shift_offset
             self.current_shift += 1
             return shift_offset, shift_length
