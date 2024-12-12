@@ -234,13 +234,13 @@ class Shifts:
         else:
             raise StopIteration
 
-class Splits:
-    def __init__(self, length, max_shift, shift_offset, shift_length, split_overlap, split_segment_length):
+class Chunks:
+    def __init__(self, length, max_shift, shift_offset, shift_length, chunk_overlap, chunk_segment_length):
         self.length = length
         self.shift_length = shift_length
-        self.split_overlap = split_overlap
-        self.split_segment_length = split_segment_length
-        self.step_size = int((1 - split_overlap) * split_segment_length)
+        self.chunk_overlap = chunk_overlap
+        self.chunk_segment_length = chunk_segment_length
+        self.step_size = int((1 - chunk_overlap) * chunk_segment_length)
         self.max_shift = max_shift
         self.shift_offset = shift_offset
         self.current_offset = 0
@@ -251,11 +251,11 @@ class Splits:
     def __next__(self):
         if self.current_offset < self.shift_length:
             inner_offset = self.current_offset
-            split_offset = self.current_offset - self.max_shift + self.shift_offset
-            split_length = min(self.length - self.current_offset, self.split_segment_length)
+            chunk_offset = self.current_offset - self.max_shift + self.shift_offset
+            chunk_length = min(self.length - self.current_offset, self.chunk_segment_length)
 
             self.current_offset += self.step_size
-            return inner_offset, split_offset, split_length
+            return inner_offset, chunk_offset, chunk_length
         else:
             raise StopIteration
 
@@ -263,45 +263,44 @@ def run_model(
     model,
     mix: torch.Tensor,
     shifts: int = 1,
-    split: bool = True,
-    split_overlap: float = 0.25,
-    split_transition_power: float = 1.0,
-    split_segment: float = 39/5,
+    chunk: bool = True,
+    chunk_overlap: float = 0.25,
+    chunk_transition_power: float = 1.0,
+    chunk_segment: float = 39/5,
 ):
     max_shift = int(0.5 * model.samplerate)
-    split_segment_length: int = int(model.samplerate * split_segment)
-    split_weight = torch.cat(
+    chunk_segment_length: int = int(model.samplerate * chunk_segment)
+    chunk_weight = torch.cat(
         [
-            torch.arange(1, split_segment_length // 2 + 1),
+            torch.arange(1, chunk_segment_length // 2 + 1),
             torch.arange(
-                split_segment_length - split_segment_length // 2, 0, -1
+                chunk_segment_length - chunk_segment_length // 2, 0, -1
             ),
         ]
     ).to(mix.device)
-    split_weight = (split_weight / split_weight.max()) ** split_transition_power
+    chunk_weight = (chunk_weight / chunk_weight.max()) ** chunk_transition_power
 
     batch, channels, length = mix.shape
     out = torch.zeros((batch, len(model.sources), channels, length)).to(mix.device)
 
     for shift_offset, shift_length in Shifts(length, max_shift, shifts):
 
-        split_out = torch.zeros(batch, len(model.sources), channels, shift_length).to(mix.device)
-        split_sum_weight = torch.zeros(shift_length).to(mix.device)
+        chunk_out = torch.zeros(batch, len(model.sources), channels, shift_length).to(mix.device)
+        chunk_sum_weight = torch.zeros(shift_length).to(mix.device)
 
-        for inner_offset, split_offset, split_length in Splits(length, max_shift, shift_offset, shift_length, split_overlap, split_segment_length):
+        for inner_offset, chunk_offset, chunk_length in Chunks(length, max_shift, shift_offset, shift_length, chunk_overlap, chunk_segment_length):
 
-            split_padded_mix = pad_symmetrically(mix, split_segment_length, offset=split_offset, length=split_length).to(mix.device)
+            chunk_padded_mix = pad_symmetrically(mix, chunk_segment_length, offset=chunk_offset, length=chunk_length).to(mix.device)
 
-            with torch.no_grad():
-                model_out = model(split_padded_mix)
+            model_out = model(chunk_padded_mix)
 
-            model_out = center_trim(model_out, split_length)
+            model_out = center_trim(model_out, chunk_length)
 
-            split_out[..., inner_offset : inner_offset + split_length] += split_weight[:split_length] * model_out
-            split_sum_weight[inner_offset : inner_offset + split_length] += split_weight[:split_length]
-        split_out /= split_sum_weight
+            chunk_out[..., inner_offset : inner_offset + chunk_length] += chunk_weight[:chunk_length] * model_out
+            chunk_sum_weight[inner_offset : inner_offset + chunk_length] += chunk_weight[:chunk_length]
+        chunk_out /= chunk_sum_weight
 
-        out += split_out[..., max_shift - shift_offset : shift_length + max_shift - shift_offset]
+        out += chunk_out[..., max_shift - shift_offset : shift_length + max_shift - shift_offset]
 
     out /= shifts
 
@@ -315,6 +314,7 @@ def postprocess(output: torch.Tensor, ref: torch.Tensor):
     return dict(zip(model.sources, output[0]))
 
 if __name__ == "__main__":
+    torch.set_grad_enabled(False)
     filename = "test2.mp3"
     device = "mps"
 
@@ -326,10 +326,10 @@ if __name__ == "__main__":
         model,
         mix,
         shifts=2,
-        split=True,
-        split_overlap=0.25,
-        split_transition_power=1.0,
-        split_segment=model.segment,
+        chunk=True,
+        chunk_overlap=0.25,
+        chunk_transition_power=1.0,
+        chunk_segment=model.segment,
     )
 
     separated = postprocess(output, ref)
