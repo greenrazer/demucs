@@ -216,7 +216,7 @@ def preprocess(
     return (ref, mix)
 
 class Shifts:
-    def __init__(self, num_shifts, max_shift, length):
+    def __init__(self, length, max_shift, num_shifts):
         self.num_shifts = num_shifts
         self.max_shift = max_shift
         self.length = length
@@ -235,12 +235,14 @@ class Shifts:
             raise StopIteration
 
 class Splits:
-    def __init__(self, length, shift_length, split_overlap, split_segment_length):
+    def __init__(self, length, max_shift, shift_offset, shift_length, split_overlap, split_segment_length):
         self.length = length
         self.shift_length = shift_length
         self.split_overlap = split_overlap
         self.split_segment_length = split_segment_length
         self.step_size = int((1 - split_overlap) * split_segment_length)
+        self.max_shift = max_shift
+        self.shift_offset = shift_offset
         self.current_offset = 0
     
     def __iter__(self):
@@ -248,11 +250,12 @@ class Splits:
     
     def __next__(self):
         if self.current_offset < self.shift_length:
-            split_offset = self.current_offset
+            inner_offset = self.current_offset
+            split_offset = self.current_offset - self.max_shift + self.shift_offset
             split_length = min(self.length - self.current_offset, self.split_segment_length)
 
             self.current_offset += self.step_size
-            return split_offset, split_length
+            return inner_offset, split_offset, split_length
         else:
             raise StopIteration
 
@@ -265,57 +268,40 @@ def run_model(
     split_transition_power: float = 1.0,
     split_segment: float = 39/5,
 ):
+    max_shift = int(0.5 * model.samplerate)
+    split_segment_length: int = int(model.samplerate * split_segment)
+    split_weight = torch.cat(
+        [
+            torch.arange(1, split_segment_length // 2 + 1),
+            torch.arange(
+                split_segment_length - split_segment_length // 2, 0, -1
+            ),
+        ]
+    ).to(mix.device)
+    split_weight = (split_weight / split_weight.max()) ** split_transition_power
 
     batch, channels, length = mix.shape
     out = torch.zeros((batch, len(model.sources), channels, length)).to(mix.device)
-    max_shift = int(0.5 * model.samplerate)
 
-    for shift_offset, shift_length in Shifts(shifts, max_shift , length):
-
-        split_segment_length: int = int(model.samplerate * split_segment)
-        split_weight = torch.cat(
-            [
-                torch.arange(1, split_segment_length // 2 + 1),
-                torch.arange(
-                    split_segment_length - split_segment_length // 2, 0, -1
-                ),
-            ]
-        ).to(mix.device)
-        split_weight = (split_weight / split_weight.max()) ** split_transition_power
+    for shift_offset, shift_length in Shifts(length, max_shift, shifts):
 
         split_out = torch.zeros(batch, len(model.sources), channels, shift_length).to(mix.device)
         split_sum_weight = torch.zeros(shift_length).to(mix.device)
 
-        for inner_offset in range(
-            0, shift_length, int((1 - split_overlap) * split_segment_length)
-        ):
-            split_offset = inner_offset
-            split_length = min(length - inner_offset, split_segment_length)
+        for inner_offset, split_offset, split_length in Splits(length, max_shift, shift_offset, shift_length, split_overlap, split_segment_length):
 
-            model_out = torch.zeros(
-                batch, len(model.sources), channels, split_length
-            ).to(mix.device)
-
-            split_padded_mix = pad_symmetrically(
-                mix, split_segment_length, offset=split_offset-max_shift+shift_offset, length=split_length
-            ).to(mix.device)
+            split_padded_mix = pad_symmetrically(mix, split_segment_length, offset=split_offset, length=split_length).to(mix.device)
 
             with torch.no_grad():
                 model_out = model(split_padded_mix)
 
             model_out = center_trim(model_out, split_length)
 
-            split_out[..., inner_offset : inner_offset + split_length] += (
-                split_weight[:split_length] * model_out
-            )
-            split_sum_weight[inner_offset : inner_offset + split_length] += (
-                split_weight[:split_length]
-            )
+            split_out[..., inner_offset : inner_offset + split_length] += split_weight[:split_length] * model_out
+            split_sum_weight[inner_offset : inner_offset + split_length] += split_weight[:split_length]
         split_out /= split_sum_weight
 
-        out += split_out[
-            ..., max_shift - shift_offset : shift_length + max_shift - shift_offset
-        ]
+        out += split_out[..., max_shift - shift_offset : shift_length + max_shift - shift_offset]
 
     out /= shifts
 
