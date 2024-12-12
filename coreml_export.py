@@ -16,6 +16,7 @@ import json
 
 # region File Manager
 
+
 @contextmanager
 def temp_filenames(count: int, delete=True):
     names = []
@@ -28,11 +29,13 @@ def temp_filenames(count: int, delete=True):
             for name in names:
                 os.unlink(name)
 
+
 class AudioFile:
     """
     Allows to read audio from any format supported by ffmpeg, as well as resampling or
     converting to mono on the fly. See :method:`read` for more details.
     """
+
     def __init__(self, path: Path):
         self.path = Path(path)
         self._info = None
@@ -48,21 +51,30 @@ class AudioFile:
     @property
     def info(self):
         if self._info is None:
-            stdout_data = subprocess.check_output([
-                'ffprobe', "-loglevel", "panic",
-                str(self.path), '-print_format', 'json', '-show_format', '-show_streams'
-            ])
-            self._info = json.loads(stdout_data.decode('utf-8'))
+            stdout_data = subprocess.check_output(
+                [
+                    "ffprobe",
+                    "-loglevel",
+                    "panic",
+                    str(self.path),
+                    "-print_format",
+                    "json",
+                    "-show_format",
+                    "-show_streams",
+                ]
+            )
+            self._info = json.loads(stdout_data.decode("utf-8"))
         return self._info
 
     @property
     def duration(self):
-        return float(self.info['format']['duration'])
+        return float(self.info["format"]["duration"])
 
     @property
     def _audio_streams(self):
         return [
-            index for index, stream in enumerate(self.info["streams"])
+            index
+            for index, stream in enumerate(self.info["streams"])
             if stream["codec_type"] == "audio"
         ]
 
@@ -70,17 +82,19 @@ class AudioFile:
         return len(self._audio_streams)
 
     def channels(self, stream=0):
-        return int(self.info['streams'][self._audio_streams[stream]]['channels'])
+        return int(self.info["streams"][self._audio_streams[stream]]["channels"])
 
     def samplerate(self, stream=0):
-        return int(self.info['streams'][self._audio_streams[stream]]['sample_rate'])
+        return int(self.info["streams"][self._audio_streams[stream]]["sample_rate"])
 
-    def read(self,
-             seek_time=None,
-             duration=None,
-             streams=slice(None),
-             samplerate=None,
-             channels=None):
+    def read(
+        self,
+        seek_time=None,
+        duration=None,
+        streams=slice(None),
+        samplerate=None,
+        channels=None,
+    ):
         """
         Slightly more efficient implementation than stempeg,
         in particular, this will extract all stems at once
@@ -112,22 +126,24 @@ class AudioFile:
             query_duration = None
         else:
             target_size = int((samplerate or self.samplerate()) * duration)
-            query_duration = float((target_size + 1) / (samplerate or self.samplerate()))
+            query_duration = float(
+                (target_size + 1) / (samplerate or self.samplerate())
+            )
 
         with temp_filenames(len(streams)) as filenames:
-            command = ['ffmpeg', '-y']
-            command += ['-loglevel', 'panic']
+            command = ["ffmpeg", "-y"]
+            command += ["-loglevel", "panic"]
             if seek_time:
-                command += ['-ss', str(seek_time)]
-            command += ['-i', str(self.path)]
+                command += ["-ss", str(seek_time)]
+            command += ["-i", str(self.path)]
             for stream, filename in zip(streams, filenames):
-                command += ['-map', f'0:{self._audio_streams[stream]}']
+                command += ["-map", f"0:{self._audio_streams[stream]}"]
                 if query_duration is not None:
-                    command += ['-t', str(query_duration)]
-                command += ['-threads', '1']
-                command += ['-f', 'f32le']
+                    command += ["-t", str(query_duration)]
+                command += ["-threads", "1"]
+                command += ["-f", "f32le"]
                 if samplerate is not None:
-                    command += ['-ar', str(samplerate)]
+                    command += ["-ar", str(samplerate)]
                 command += [filename]
 
             subprocess.run(command, check=True)
@@ -264,7 +280,9 @@ def save_audio(
     else:
         raise ValueError(f"Invalid suffix for path: {suffix}")
 
+
 # endregion File Manager
+
 
 def convert_audio_channels(wav, channels=2):
     """Convert audio to the given number of channels."""
@@ -331,16 +349,17 @@ def center_trim(tensor: torch.Tensor, reference: Union[torch.Tensor, int]):
         tensor = tensor[..., delta // 2 : -(delta - delta // 2)]
     return tensor
 
+
 class Shifts:
     def __init__(self, length, max_shift, num_shifts):
         self.num_shifts = num_shifts
         self.max_shift = max_shift
         self.length = length
         self.current_shift = 0
-    
+
     def __iter__(self):
         return self
-    
+
     def __next__(self):
         if self.current_shift < self.num_shifts:
             shift_offset = self.max_shift // (self.current_shift + 1)
@@ -350,8 +369,17 @@ class Shifts:
         else:
             raise StopIteration
 
+
 class Chunks:
-    def __init__(self, length, max_shift, shift_offset, shift_length, chunk_overlap, chunk_segment_length):
+    def __init__(
+        self,
+        length,
+        max_shift,
+        shift_offset,
+        shift_length,
+        chunk_overlap,
+        chunk_segment_length,
+    ):
         self.length = length
         self.shift_length = shift_length
         self.chunk_overlap = chunk_overlap
@@ -361,21 +389,26 @@ class Chunks:
         self.current_offset = 0
 
         self.step_size = int((1 - chunk_overlap) * chunk_segment_length)
-        self.shift_size = min(self.length + (2 * self.max_shift) - self.shift_offset, self.shift_length)
-    
+        self.shift_size = min(
+            self.length + (2 * self.max_shift) - self.shift_offset, self.shift_length
+        )
+
     def __iter__(self):
         return self
-    
+
     def __next__(self):
         if self.current_offset < self.shift_length:
             inner_offset = self.current_offset
             chunk_offset = self.current_offset - self.max_shift + self.shift_offset
-            chunk_length = min(self.shift_size - self.current_offset, self.chunk_segment_length)
+            chunk_length = min(
+                self.shift_size - self.current_offset, self.chunk_segment_length
+            )
 
             self.current_offset += self.step_size
             return inner_offset, chunk_offset, chunk_length
         else:
             raise StopIteration
+
 
 def preprocess(
     wav: torch.Tensor,
@@ -396,22 +429,21 @@ def preprocess(
 
     return (ref, mix)
 
+
 def run_model(
     model,
     mix: torch.Tensor,
     shifts: int = 1,
     chunk_overlap: float = 0.25,
     chunk_transition_power: float = 1.0,
-    chunk_segment: float = 39/5,
+    chunk_segment: float = 39 / 5,
 ):
     max_shift = int(0.5 * model.samplerate)
     chunk_segment_length: int = int(model.samplerate * chunk_segment)
     chunk_weight = torch.cat(
         [
             torch.arange(1, chunk_segment_length // 2 + 1),
-            torch.arange(
-                chunk_segment_length - chunk_segment_length // 2, 0, -1
-            ),
+            torch.arange(chunk_segment_length - chunk_segment_length // 2, 0, -1),
         ]
     ).to(mix.device)
     chunk_weight = (chunk_weight / chunk_weight.max()) ** chunk_transition_power
@@ -420,27 +452,43 @@ def run_model(
     out = torch.zeros((batch, len(model.sources), channels, length)).to(mix.device)
 
     for shift_offset, shift_length in Shifts(length, max_shift, shifts):
-
-        chunk_out = torch.zeros(batch, len(model.sources), channels, shift_length).to(mix.device)
+        chunk_out = torch.zeros(batch, len(model.sources), channels, shift_length).to(
+            mix.device
+        )
         chunk_sum_weight = torch.zeros(shift_length).to(mix.device)
 
-        for inner_offset, chunk_offset, chunk_length in Chunks(length, max_shift, shift_offset, shift_length, chunk_overlap, chunk_segment_length):
-
-            chunk_padded_mix = pad_symmetrically(mix, chunk_segment_length, offset=chunk_offset, length=chunk_length).to(mix.device)
+        for inner_offset, chunk_offset, chunk_length in Chunks(
+            length,
+            max_shift,
+            shift_offset,
+            shift_length,
+            chunk_overlap,
+            chunk_segment_length,
+        ):
+            chunk_padded_mix = pad_symmetrically(
+                mix, chunk_segment_length, offset=chunk_offset, length=chunk_length
+            ).to(mix.device)
 
             model_out = model(chunk_padded_mix)
 
             model_out = center_trim(model_out, chunk_length)
 
-            chunk_out[..., inner_offset : inner_offset + chunk_length] += chunk_weight[:chunk_length] * model_out
-            chunk_sum_weight[inner_offset : inner_offset + chunk_length] += chunk_weight[:chunk_length]
+            chunk_out[..., inner_offset : inner_offset + chunk_length] += (
+                chunk_weight[:chunk_length] * model_out
+            )
+            chunk_sum_weight[inner_offset : inner_offset + chunk_length] += (
+                chunk_weight[:chunk_length]
+            )
         chunk_out /= chunk_sum_weight
 
-        out += chunk_out[..., max_shift - shift_offset : shift_length + max_shift - shift_offset]
+        out += chunk_out[
+            ..., max_shift - shift_offset : shift_length + max_shift - shift_offset
+        ]
 
     out /= shifts
 
     return out
+
 
 def postprocess(output: torch.Tensor, ref: torch.Tensor, sources: List[str]):
     # un-normalized
@@ -448,6 +496,7 @@ def postprocess(output: torch.Tensor, ref: torch.Tensor, sources: List[str]):
     output += ref.mean()
 
     return dict(zip(sources, output[0]))
+
 
 if __name__ == "__main__":
     torch.set_grad_enabled(False)
@@ -471,7 +520,6 @@ if __name__ == "__main__":
 
     for stem, audio_data in separated.items():
         save_audio(
-            # audio_data[..., -model.samplerate*2:],
             audio_data,
             f"separated/coreml-shifts2/{stem}_{filename}",
             samplerate=model.samplerate,
