@@ -18,3 +18,5 @@ Session.vim
 .DS_Store
 test2.mp3
 /models
+**/*.pt
+**/*.mlpackage/

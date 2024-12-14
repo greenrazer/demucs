@@ -13,8 +13,9 @@ import julius
 import lameenc
 import json
 
+import coremltools as ct
+
 from demucs.htdemucs import HTDemucs
-from demucs.api import Separator
 
 # region File Manager
 
@@ -413,13 +414,15 @@ def preprocess(
 def run_model(
     model,
     mix: torch.Tensor,
+    sample_rate = 44100,
+    sources = ['drums', 'bass', 'other', 'vocals'],
     shifts: int = 1,
     chunk_overlap: float = 0.25,
     chunk_transition_power: float = 1.0,
     chunk_segment: float = 39 / 5,
 ):
-    max_shift = int(0.5 * model.samplerate)
-    chunk_segment_length: int = int(model.samplerate * chunk_segment)
+    max_shift = int(0.5 * sample_rate)
+    chunk_segment_length: int = int(sample_rate * chunk_segment)
     chunk_weight = torch.cat(
         [
             torch.arange(1, chunk_segment_length // 2 + 1),
@@ -429,10 +432,10 @@ def run_model(
     chunk_weight = (chunk_weight / chunk_weight.max()) ** chunk_transition_power
 
     batch, channels, length = mix.shape
-    out = torch.zeros((batch, len(model.sources), channels, length)).to(mix.device)
+    out = torch.zeros((batch, len(sources), channels, length)).to(mix.device)
 
     for shift_offset, shift_length in Shifts(length, max_shift, shifts):
-        chunk_out = torch.zeros(batch, len(model.sources), channels, shift_length).to(
+        chunk_out = torch.zeros(batch, len(sources), channels, shift_length).to(
             mix.device
         )
         chunk_sum_weight = torch.zeros(shift_length).to(mix.device)
@@ -459,7 +462,9 @@ def run_model(
 
             padded_chunk = F.pad(mix[..., correct_start:correct_end], (pad_left, pad_right))
 
+            print(padded_chunk.shape)
             model_out = model(padded_chunk)
+            print(model_out.shape)
 
             model_out = center_trim(model_out, chunk_length)
 
@@ -479,7 +484,6 @@ def run_model(
 
     return out
 
-
 def postprocess(output: torch.Tensor, ref: torch.Tensor, sources: List[str]):
     # un-normalized
     output *= ref.std() + 1e-8
@@ -487,31 +491,60 @@ def postprocess(output: torch.Tensor, ref: torch.Tensor, sources: List[str]):
 
     return dict(zip(sources, output[0]))
 
+class CoreMLWrapper():
+    def __init__(self, ctmodel):
+        self.ctmodel = ctmodel
+
+    def __call__(self, x):
+        self.ctmodel.predict({
+            "audio": x
+        })
 
 if __name__ == "__main__":
     torch.set_grad_enabled(False)
     filename = "test2.mp3"
     device = "mps"
 
-    model = HTDemucs.from_pretrained("KeighBee/demucs").to(device)
+    model = HTDemucs.from_pretrained("KeighBee/demucs").eval().to(device)
 
-    wav = load_audio(model, filename).to(device)
+    dummy_input = torch.randn([1, 2, 343980]).to(device)
 
-    ref, mix = preprocess(wav, model.samplerate, model.samplerate, model.audio_channels)
-    output = run_model(
-        model,
-        mix,
-        shifts=2,
-        chunk_overlap=0.25,
-        chunk_transition_power=1.0,
-        chunk_segment=model.segment,
+    traced_model = torch.jit.trace(model, (dummy_input,))
+
+    ctmodel = ct.convert(
+        traced_model,
+        inputs=[
+            ct.TensorType("audioMixed",shape=dummy_input.shape,)
+        ],
+        outputs=[
+            ct.TensorType("audioSeparated")
+        ],
+        minimum_deployment_target=ct.target.iOS18,
+        compute_precision=ct.precision.FLOAT16,
     )
 
-    separated = postprocess(output, ref, model.sources)
+    # torch.Size([1, 2, 343980])
+    # torch.Size([1, 4, 2, 343980])
 
-    for stem, audio_data in separated.items():
-        save_audio(
-            audio_data,
-            f"separated/coreml-shifts2/{stem}_{filename}",
-            samplerate=model.samplerate,
-        )
+    # wav = load_audio(model, filename).to(device)
+
+    # ref, mix = preprocess(wav, model.samplerate, model.samplerate, model.audio_channels)
+    # output = run_model(
+    #     model,
+    #     mix,
+    #     sample_rate=model.samplerate,
+    #     sources=model.sources,
+    #     shifts=2,
+    #     chunk_overlap=0.25,
+    #     chunk_transition_power=1.0,
+    #     chunk_segment=model.segment,
+    # )
+
+    # separated = postprocess(output, ref, model.sources)
+
+    # for stem, audio_data in separated.items():
+    #     save_audio(
+    #         audio_data,
+    #         f"separated/coreml-shifts2/{stem}_{filename}",
+    #         samplerate=model.samplerate,
+    #     )
