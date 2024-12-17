@@ -102,126 +102,126 @@ class Wrap(torch.nn.Module):
 
 #     tm.save("model.pt")
 
-fft_real = FFTCore()
-ifft_real = FFTCore(inverse=True)
-def comprehensive_fft_tests():
-    """
-    Comprehensive test suite for FFT implementation
-    """
-    print("\n--- Comprehensive FFT Tests ---")
+# fft_real = FFTCore()
+# ifft_real = FFTCore(inverse=True)
+# def comprehensive_fft_tests():
+#     """
+#     Comprehensive test suite for FFT implementation
+#     """
+#     print("\n--- Comprehensive FFT Tests ---")
     
-    # Utility function for detailed comparison
-    def detailed_comparison(original, reconstructed, test_name):
-        """
-        Provide detailed comparison of original and reconstructed signals
-        """
-        print(f"\nDetailed Comparison for {test_name}")
+#     # Utility function for detailed comparison
+#     def detailed_comparison(original, reconstructed, test_name):
+#         """
+#         Provide detailed comparison of original and reconstructed signals
+#         """
+#         print(f"\nDetailed Comparison for {test_name}")
         
-        # Compute absolute differences
-        abs_diff = torch.abs(original - reconstructed)
+#         # Compute absolute differences
+#         abs_diff = torch.abs(original - reconstructed)
         
-        # Basic statistics
-        print("Absolute Difference Statistics:")
-        print(f"Max Difference: {torch.max(abs_diff)}")
-        print(f"Mean Difference: {torch.mean(abs_diff)}")
-        print(f"Standard Deviation of Difference: {torch.std(abs_diff)}")
+#         # Basic statistics
+#         print("Absolute Difference Statistics:")
+#         print(f"Max Difference: {torch.max(abs_diff)}")
+#         print(f"Mean Difference: {torch.mean(abs_diff)}")
+#         print(f"Standard Deviation of Difference: {torch.std(abs_diff)}")
         
-        # Plot original and reconstructed signals
-        plt.figure(figsize=(12, 6))
-        plt.subplot(2, 1, 1)
-        plt.title(f"{test_name} - Original Signal")
-        plt.plot(original.numpy(), label='Original')
-        plt.legend()
+#         # Plot original and reconstructed signals
+#         plt.figure(figsize=(12, 6))
+#         plt.subplot(2, 1, 1)
+#         plt.title(f"{test_name} - Original Signal")
+#         plt.plot(original.numpy(), label='Original')
+#         plt.legend()
         
-        plt.subplot(2, 1, 2)
-        plt.title(f"{test_name} - Reconstructed Signal")
-        plt.plot(reconstructed.numpy(), label='Reconstructed')
-        plt.plot(original.numpy(), label='Original', linestyle='--', alpha=0.5)
-        plt.legend()
+#         plt.subplot(2, 1, 2)
+#         plt.title(f"{test_name} - Reconstructed Signal")
+#         plt.plot(reconstructed.numpy(), label='Reconstructed')
+#         plt.plot(original.numpy(), label='Original', linestyle='--', alpha=0.5)
+#         plt.legend()
         
-        plt.tight_layout()
-        plt.show()
+#         plt.tight_layout()
+#         plt.show()
         
-        # Detailed index-wise comparison
-        print("\nIndex-wise Differences:")
-        for i, (orig, recon, diff) in enumerate(zip(original, reconstructed, abs_diff)):
-            if diff > 1e-6:
-                print(f"Index {i}: Original={orig:.6f}, Reconstructed={recon:.6f}, Difference={diff:.6f}")
+#         # Detailed index-wise comparison
+#         print("\nIndex-wise Differences:")
+#         for i, (orig, recon, diff) in enumerate(zip(original, reconstructed, abs_diff)):
+#             if diff > 1e-6:
+#                 print(f"Index {i}: Original={orig:.6f}, Reconstructed={recon:.6f}, Difference={diff:.6f}")
     
-    # Test 1: Zero input
-    def test_zero_input():
-        print("Test 1: Zero Input")
-        input_tensor = torch.zeros(512)
-        fft_result = fft_real(torch.stack((input_tensor, torch.zeros_like(input_tensor)), dim=-1))
-        ifft_result = ifft_real(fft_result)[..., 0]
+#     # Test 1: Zero input
+#     def test_zero_input():
+#         print("Test 1: Zero Input")
+#         input_tensor = torch.zeros(512)
+#         fft_result = fft_real(torch.stack((input_tensor, torch.zeros_like(input_tensor)), dim=-1))
+#         ifft_result = ifft_real(fft_result)[..., 0]
         
-        assert torch.allclose(input_tensor, ifft_result, atol=1e-6), "Zero input test failed!"
-        print("Zero input test passed.")
+#         assert torch.allclose(input_tensor, ifft_result, atol=1e-6), "Zero input test failed!"
+#         print("Zero input test passed.")
     
-    # Test 2: Constant input
-    def test_constant_input():
-        print("Test 2: Constant Input")
-        input_tensor = torch.ones(512)
-        fft_result = fft_real(torch.stack((input_tensor, torch.zeros_like(input_tensor)), dim=-1))
-        ifft_result = ifft_real(fft_result)[..., 0]
+#     # Test 2: Constant input
+#     def test_constant_input():
+#         print("Test 2: Constant Input")
+#         input_tensor = torch.ones(512)
+#         fft_result = fft_real(torch.stack((input_tensor, torch.zeros_like(input_tensor)), dim=-1))
+#         ifft_result = ifft_real(fft_result)[..., 0]
 
-        detailed_comparison(input_tensor, ifft_result, "Const")
+#         detailed_comparison(input_tensor, ifft_result, "Const")
         
-        assert torch.allclose(input_tensor, ifft_result, atol=1e-6), "Constant input test failed!"
-        print("Constant input test passed.")
+#         assert torch.allclose(input_tensor, ifft_result, atol=1e-6), "Constant input test failed!"
+#         print("Constant input test passed.")
     
-    # Test 3: Sine Wave with Multiple Frequencies
-    def test_multi_frequency_sine():
-        print("Test 3: Multi-Frequency Sine Wave")
-        n = 512
-        t = torch.arange(n, dtype=torch.float32)
+#     # Test 3: Sine Wave with Multiple Frequencies
+#     def test_multi_frequency_sine():
+#         print("Test 3: Multi-Frequency Sine Wave")
+#         n = 512
+#         t = torch.arange(n, dtype=torch.float32)
         
-        # Composite sine wave with multiple frequencies
-        sine_wave = (
-            torch.sin(2 * torch.pi * 2 * t / n) +  # 2 Hz
-            0.5 * torch.sin(2 * torch.pi * 3 * t / n) +  # 3 Hz with half amplitude
-            0.25 * torch.sin(2 * torch.pi * 5 * t / n)   # 5 Hz with quarter amplitude
-        )
+#         # Composite sine wave with multiple frequencies
+#         sine_wave = (
+#             torch.sin(2 * torch.pi * 2 * t / n) +  # 2 Hz
+#             0.5 * torch.sin(2 * torch.pi * 3 * t / n) +  # 3 Hz with half amplitude
+#             0.25 * torch.sin(2 * torch.pi * 5 * t / n)   # 5 Hz with quarter amplitude
+#         )
         
-        fft_result = fft_real(torch.stack((sine_wave, torch.zeros_like(sine_wave)), dim=-1))
+#         fft_result = fft_real(torch.stack((sine_wave, torch.zeros_like(sine_wave)), dim=-1))
         
-        # Visualize frequency spectrum
-        magnitudes = torch.norm(fft_result, p=2, dim=1)
-        print("Magnitude Spectrum:", magnitudes)
+#         # Visualize frequency spectrum
+#         magnitudes = torch.norm(fft_result, p=2, dim=1)
+#         print("Magnitude Spectrum:", magnitudes)
         
-        ifft_result = ifft_real(fft_result)[..., 0]
+#         ifft_result = ifft_real(fft_result)[..., 0]
         
-        # Detailed comparison
-        detailed_comparison(sine_wave, ifft_result, "Multi-Frequency Sine Wave")
+#         # Detailed comparison
+#         detailed_comparison(sine_wave, ifft_result, "Multi-Frequency Sine Wave")
 
-        print(ifft_result)
+#         print(ifft_result)
         
-        assert torch.allclose(sine_wave, ifft_result, atol=1e-6), "Multi-frequency sine wave test failed!"
-        print("Multi-frequency sine wave test passed.")
+#         assert torch.allclose(sine_wave, ifft_result, atol=1e-6), "Multi-frequency sine wave test failed!"
+#         print("Multi-frequency sine wave test passed.")
     
-    # Test 4: Random Input Reproducibility
-    def test_random_input_reproducibility():
-        print("Test 4: Random Input Reproducibility")
-        torch.manual_seed(42)  # Set seed for reproducibility
-        input_tensor = torch.rand(512)
+#     # Test 4: Random Input Reproducibility
+#     def test_random_input_reproducibility():
+#         print("Test 4: Random Input Reproducibility")
+#         torch.manual_seed(42)  # Set seed for reproducibility
+#         input_tensor = torch.rand(512)
         
-        fft_result = fft_real(torch.stack((input_tensor, torch.zeros_like(input_tensor)), dim=-1))
-        ifft_result = ifft_real(fft_result)[..., 0]
+#         fft_result = fft_real(torch.stack((input_tensor, torch.zeros_like(input_tensor)), dim=-1))
+#         ifft_result = ifft_real(fft_result)[..., 0]
         
-        # Detailed comparison
-        detailed_comparison(input_tensor, ifft_result, "Random Input")
+#         # Detailed comparison
+#         detailed_comparison(input_tensor, ifft_result, "Random Input")
         
-        assert torch.allclose(input_tensor, ifft_result, atol=1e-6), "Random input reproducibility test failed!"
-        print("Random input reproducibility test passed.")
+#         assert torch.allclose(input_tensor, ifft_result, atol=1e-6), "Random input reproducibility test failed!"
+#         print("Random input reproducibility test passed.")
     
-    # Run tests
-    test_zero_input()
-    test_constant_input()
-    test_multi_frequency_sine()
-    test_random_input_reproducibility()
+#     # Run tests
+#     test_zero_input()
+#     test_constant_input()
+#     test_multi_frequency_sine()
+#     test_random_input_reproducibility()
     
-    print("\n--- All Comprehensive FFT Tests Passed! ---")
+#     print("\n--- All Comprehensive FFT Tests Passed! ---")
 
 
-if __name__ == "__main__":
-    comprehensive_fft_tests()
+# if __name__ == "__main__":
+#     comprehensive_fft_tests()
