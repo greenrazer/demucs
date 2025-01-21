@@ -15,3 +15,8 @@ Session.vim
 /misc
 /mdx
 .mypy_cache
+.DS_Store
+test2.mp3
+/models
+**/*.pt
+**/*.mlpackage/
